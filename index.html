@@ -43,6 +43,7 @@
   #tree .pkg { font-weight: 600; }
   #tree .plat { color: #9aa0b4; }
   #tree .ver { color: #cfe9e4; font-family: ui-monospace, Menlo, Consolas, monospace; padding: 1px 0 1px 18px; }
+  #tree .date { color: #7d8598; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
 </style>
 </head>
 <body>
@@ -135,8 +136,8 @@
         for (const r of shown) {
           if (!byName.has(r.name)) byName.set(r.name, new Map());
           const pl = r.os + "/" + r.arch, m = byName.get(r.name);
-          if (!m.has(pl)) m.set(pl, new Set());
-          m.get(pl).add(r.version);
+          if (!m.has(pl)) m.set(pl, new Map()); // version -> published date
+          m.get(pl).set(r.version, r.published || "");
         }
         const tree = el("tree"); tree.textContent = "";
         for (const name of [...byName.keys()].sort()) {
@@ -146,8 +147,11 @@
           for (const pl of [...byName.get(name).keys()].sort()) {
             const pd = document.createElement("details"); pd.open = true;
             const ps = document.createElement("summary"); ps.className = "plat"; ps.textContent = pl; pd.appendChild(ps);
-            for (const v of [...byName.get(name).get(pl)].sort()) {
-              const vv = document.createElement("div"); vv.className = "ver"; vv.textContent = v; pd.appendChild(vv);
+            for (const v of [...byName.get(name).get(pl).keys()].sort()) {
+              const vv = document.createElement("div"); vv.className = "ver"; vv.textContent = v;
+              const pub = byName.get(name).get(pl).get(v);
+              if (pub) { const sp = document.createElement("span"); sp.className = "date"; sp.textContent = "  ·  " + pub; vv.appendChild(sp); }
+              pd.appendChild(vv);
             }
             d.appendChild(pd);
           }

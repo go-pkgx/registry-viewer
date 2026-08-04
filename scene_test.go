@@ -116,14 +116,17 @@ func TestVisibleRowsMatchDefaultTree(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	rows := s.visibleRows()
 	// The first rows are deterministic: root, then the first package
-	// (hugo) and its os/arch -> version subtree.
+	// (hugo) and its os/arch -> version subtree. Version leaves carry the
+	// publication date after a "   ·   " separator when the row has one;
+	// hugo/linux/amd64 0.128.0 has an EMPTY published date in the sample, so
+	// that leaf shows the bare version — exercising both label branches.
 	want := []visibleRow{
 		{"registry", 0},
 		{"hugo", 1},
 		{"darwin/arm64", 2},
-		{"0.129.0", 3},
+		{"0.129.0" + versionSep + "2026-08-03", 3},
 		{"linux/amd64", 2},
-		{"0.128.0", 3},
+		{"0.128.0", 3}, // empty published -> bare version, no separator
 		{"jq", 1},
 	}
 	if len(rows) < len(want) {
@@ -137,6 +140,66 @@ func TestVisibleRowsMatchDefaultTree(t *testing.T) {
 	// Row y math: hugo is index 1 -> treeTop + 18, jq is index 6.
 	if got := s.rowY(1); got != s.tree.Bounds().Y+1*rowHeight {
 		t.Fatalf("rowY(1) = %d, want %d", got, s.tree.Bounds().Y+rowHeight)
+	}
+}
+
+// TestVersionLabel covers both label branches: a dated version and an
+// undated one.
+func TestVersionLabel(t *testing.T) {
+	if got := versionLabel("1.10.0", "2026-08-02"); got != "1.10.0"+versionSep+"2026-08-02" {
+		t.Fatalf("dated label = %q", got)
+	}
+	if got := versionLabel("0.128.0", ""); got != "0.128.0" {
+		t.Fatalf("undated label = %q, want bare version", got)
+	}
+}
+
+// TestVersionLeafCarriesPublishedDate walks the filtered tree and asserts a
+// specific version leaf carries its publication date, and that the empty-date
+// leaf carries none — so the date is threaded from the model through the
+// TreeView labels the WASM view paints.
+func TestVersionLeafCarriesPublishedDate(t *testing.T) {
+	s := newState(surfaceW, surfaceH, nil)
+	// Find lz4 -> linux/amd64 -> 1.10.0 (published 2026-08-02).
+	var lz4 *toolkit.TreeNode
+	for _, n := range s.tree.Root.Children {
+		if n.Label == "lz4" {
+			lz4 = n
+		}
+	}
+	if lz4 == nil {
+		t.Fatal("lz4 node missing")
+	}
+	found := false
+	for _, plat := range lz4.Children {
+		if plat.Label != "linux/amd64" {
+			continue
+		}
+		for _, leaf := range plat.Children {
+			if leaf.Data == "1.10.0" {
+				found = true
+				if leaf.Label != "1.10.0"+versionSep+"2026-08-02" {
+					t.Fatalf("lz4 1.10.0 leaf label = %q, want dated", leaf.Label)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("lz4 linux/amd64 1.10.0 leaf not found")
+	}
+	// The undated hugo 0.128.0 leaf must show the bare version (Data holds the
+	// version; Label omits any separator).
+	for _, n := range s.tree.Root.Children {
+		if n.Label != "hugo" {
+			continue
+		}
+		for _, plat := range n.Children {
+			for _, leaf := range plat.Children {
+				if leaf.Data == "0.128.0" && leaf.Label != "0.128.0" {
+					t.Fatalf("undated hugo 0.128.0 leaf label = %q, want bare version", leaf.Label)
+				}
+			}
+		}
 	}
 }
 
@@ -445,9 +508,19 @@ func TestParseRegistryError(t *testing.T) {
 	if _, err := parseRegistry([]byte("nonsense")); err == nil {
 		t.Fatal("parseRegistry should error on malformed JSON")
 	}
-	rows, err := parseRegistry([]byte(`[{"name":"x","os":"linux","arch":"amd64","version":"1"}]`))
-	if err != nil || len(rows) != 1 || rows[0].Name != "x" {
+	// A row WITH published, and one WITHOUT the key (tolerated -> "").
+	rows, err := parseRegistry([]byte(`[
+		{"name":"x","os":"linux","arch":"amd64","version":"1","published":"2026-08-02"},
+		{"name":"y","os":"darwin","arch":"arm64","version":"2"}
+	]`))
+	if err != nil || len(rows) != 2 || rows[0].Name != "x" {
 		t.Fatalf("parseRegistry valid input: rows=%v err=%v", rows, err)
+	}
+	if rows[0].Published != "2026-08-02" {
+		t.Fatalf("row 0 Published = %q, want 2026-08-02", rows[0].Published)
+	}
+	if rows[1].Published != "" {
+		t.Fatalf("row 1 (no published key) Published = %q, want empty", rows[1].Published)
 	}
 }
 

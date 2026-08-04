@@ -58,11 +58,16 @@ const (
 )
 
 // pkg is one published package/platform/version row from registry.json.
+// Published is the ISO date (YYYY-MM-DD) the version/platform was
+// published to the registry; it may be empty ("") when unknown (the
+// packages factory fills it from the ghcr version's created_at). It is
+// tolerated missing — a row with no "published" key unmarshals to "".
 type pkg struct {
-	Name    string `json:"name"`
-	OS      string `json:"os"`
-	Arch    string `json:"arch"`
-	Version string `json:"version"`
+	Name      string `json:"name"`
+	OS        string `json:"os"`
+	Arch      string `json:"arch"`
+	Version   string `json:"version"`
+	Published string `json:"published"`
 }
 
 // state is the whole scene: the parsed registry, the filter widgets,
@@ -206,6 +211,21 @@ func newState(w, _ int, data []byte) *state {
 	return s
 }
 
+// versionSep separates a version from its publication date in a version
+// leaf label (e.g. "1.10.0   ·   2026-08-02").
+const versionSep = "   ·   "
+
+// versionLabel formats a version-leaf label: the bare version when it has
+// no known publication date, else "version <sep> date". Keeping the date
+// out when empty avoids a dangling separator on rows the factory could not
+// date.
+func versionLabel(version, published string) string {
+	if published == "" {
+		return version
+	}
+	return version + versionSep + published
+}
+
 // domainValue maps a ViewSwitcher index to its filter value: index 0
 // ("All") is the empty "no filter" string; index i>0 is domain[i-1].
 func domainValue(domain []string, i int) string {
@@ -238,26 +258,24 @@ func (s *state) passes(p pkg) bool {
 // filter change. Deterministic: names, os/arch groups and versions are
 // each sorted.
 func (s *state) rebuild() {
-	// name -> "os/arch" -> set(version)
-	type group struct {
-		key      string
-		versions map[string]bool
-	}
-	byName := map[string]map[string]map[string]bool{}
+	// name -> "os/arch" -> version -> published date. The registry has one
+	// row per (name, os, arch, version), so a plain assignment (last wins)
+	// carries each version's publication date without a merge branch.
+	byName := map[string]map[string]map[string]string{}
 	var names []string
 	for _, p := range s.pkgs {
 		if !s.passes(p) {
 			continue
 		}
 		if byName[p.Name] == nil {
-			byName[p.Name] = map[string]map[string]bool{}
+			byName[p.Name] = map[string]map[string]string{}
 			names = append(names, p.Name)
 		}
 		key := p.OS + "/" + p.Arch
 		if byName[p.Name][key] == nil {
-			byName[p.Name][key] = map[string]bool{}
+			byName[p.Name][key] = map[string]string{}
 		}
-		byName[p.Name][key][p.Version] = true
+		byName[p.Name][key][p.Version] = p.Published
 	}
 	sort.Strings(names)
 
@@ -277,7 +295,8 @@ func (s *state) rebuild() {
 			}
 			sort.Strings(vers)
 			for _, v := range vers {
-				platNode.Children = append(platNode.Children, &toolkit.TreeNode{Label: v, Data: v})
+				platNode.Children = append(platNode.Children,
+					&toolkit.TreeNode{Label: versionLabel(v, byName[name][k][v]), Data: v})
 			}
 			nameNode.Children = append(nameNode.Children, platNode)
 		}
