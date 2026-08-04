@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Scene state for the go-pkgx registry viewer. Composes a SearchEntry
-// (name filter), two ViewSwitcher segmented controls (os / arch), a
-// DropDown combobox (version), a TreeView (name -> os/arch -> version)
-// and a Statusbar count into a single filterable dashboard, all from
-// go-widgets/toolkit.
+// (name filter), three DropDown combos (os / arch / version filters), a
+// TreeTable columned tree grid (Package: name -> os/arch -> version;
+// Published: the version's date) and a Statusbar count into a single
+// filterable dashboard, all from go-widgets/toolkit.
 //
 // Kept in a separate file with NO js/wasm build tag (main.go carries
 // it) so a native `go test` can exercise the whole scene — parse,
@@ -32,7 +32,7 @@ import (
 //go:embed registry.json
 var embeddedRegistry []byte
 
-// Surface dimensions. Fixed (not content-derived): the TreeView
+// Surface dimensions. Fixed (not content-derived): the TreeTable
 // virtualizes + scrolls internally, so the canvas stays a constant
 // size. Lives in scene.go (not main.go) so the native scene_test
 // compiles without the js && wasm tag.
@@ -42,16 +42,19 @@ const (
 )
 
 // Layout constants. A single outer margin, a uniform inter-row gap,
-// and the fixed heights of the search box, the filter switcher strip
-// and the bottom status bar. The TreeView flexes to fill the rest.
+// and the fixed heights of the search box, the filter (combo) strip and
+// the bottom status bar. The TreeTable grid flexes to fill the rest.
 const (
-	margin    = 8
-	gap       = 6
-	searchH   = 26
-	switchH   = 28
-	rowHeight = 18 // TreeView row height (also the toolkit default)
+	margin  = 8
+	gap     = 6
+	searchH = 26
+	filterH = 28
 
-	// dropDownRowH is the pixel height of one row in the version DropDown's
+	// gridPubColW is the fixed pixel width of the Published (date) column;
+	// the Package tree column takes the remaining (auto) width.
+	gridPubColW = 132
+
+	// dropDownRowH is the pixel height of one row in a filter DropDown's
 	// popover (matches the toolkit's PopoverBounds row step), used to map a
 	// click inside the popover back to an option index.
 	dropDownRowH = 18
@@ -71,41 +74,41 @@ type pkg struct {
 }
 
 // state is the whole scene: the parsed registry, the filter widgets,
-// the TreeView, the Statusbar and the box layout that positions them.
+// the TreeTable grid, the Statusbar and the box layout that positions them.
 type state struct {
 	w, h  int
 	theme *toolkit.Theme
 
 	pkgs []pkg // every registry row, unfiltered
 
-	// Distinct, sorted filter domains. Each ViewSwitcher's Views is
-	// {"All"} ++ the domain, so segment 0 is "no filter".
+	// Distinct, sorted filter domains. Each filter DropDown's Options is
+	// {"All"} ++ the domain, so option 0 is "no filter".
 	osDomain   []string
 	archDomain []string
 	verDomain  []string
 
 	// Active filter state. nameFilter is stored lower-cased for a
 	// case-insensitive substring match; an empty os/arch/verFilter
-	// means "All" (segment 0).
+	// means "All" (option 0).
 	nameFilter string
 	osFilter   string
 	archFilter string
 	verFilter  string
 
-	// Widgets. os + arch are low-cardinality, so segmented ViewSwitchers
-	// read best; version is high-cardinality (many published versions), so a
-	// DropDown combobox is the fitting control — it stays compact and opens a
-	// scrollable option popover instead of an unreadable overcrowded strip.
-	search     *toolkit.SearchEntry
-	osSwitch   *toolkit.ViewSwitcher
-	archSwitch *toolkit.ViewSwitcher
-	verDrop    *toolkit.DropDown
-	tree       *toolkit.TreeView
-	status     *toolkit.Statusbar
+	// Widgets. A SearchEntry filters by name; three DropDown combos filter
+	// os / arch / version. The registry itself is a TreeTable (columned tree
+	// grid): a Package tree column carrying name -> os/arch -> version, and a
+	// Published date column on the version-leaf rows.
+	search   *toolkit.SearchEntry
+	osDrop   *toolkit.DropDown
+	archDrop *toolkit.DropDown
+	verDrop  *toolkit.DropDown
+	grid     *toolkit.TreeTable
+	status   *toolkit.Statusbar
 
-	// Box layout. root stacks the search box, the filter strip, the
-	// tree and the status bar vertically; filterRow packs the three
-	// switchers left-to-right.
+	// Box layout. root stacks the search box, the filter (combo) strip, the
+	// grid and the status bar vertically; filterRow packs the three combos
+	// left-to-right.
 	root      *toolkit.VBox
 	filterRow *toolkit.HBox
 
@@ -175,58 +178,53 @@ func newState(w, _ int, data []byte) *state {
 		s.rebuild()
 	}
 
-	s.osSwitch = toolkit.NewViewSwitcher(append([]string{"All"}, s.osDomain...), 0)
-	s.osSwitch.OnChange = func(i int) { s.osFilter = domainValue(s.osDomain, i); s.rebuild() }
-	s.archSwitch = toolkit.NewViewSwitcher(append([]string{"All"}, s.archDomain...), 0)
-	s.archSwitch.OnChange = func(i int) { s.archFilter = domainValue(s.archDomain, i); s.rebuild() }
+	s.osDrop = toolkit.NewDropDown(append([]string{"All"}, s.osDomain...), 0)
+	s.osDrop.OnSelect = func(i int) { s.osFilter = domainValue(s.osDomain, i); s.rebuild() }
+	s.archDrop = toolkit.NewDropDown(append([]string{"All"}, s.archDomain...), 0)
+	s.archDrop.OnSelect = func(i int) { s.archFilter = domainValue(s.archDomain, i); s.rebuild() }
 	s.verDrop = toolkit.NewDropDown(append([]string{"All"}, s.verDomain...), 0)
 	s.verDrop.OnSelect = func(i int) { s.verFilter = domainValue(s.verDomain, i); s.rebuild() }
 
-	s.tree = toolkit.NewTreeView(nil)
-	s.tree.RowHeight = rowHeight
+	// TreeTable (columned tree grid): Package (tree column, auto width) +
+	// Published (fixed date column, right-aligned so dates line up).
+	s.grid = toolkit.NewTreeTable([]toolkit.TreeTableColumn{
+		{Title: "Package"},
+		{Title: "Published", Width: gridPubColW, Align: toolkit.AlignRight},
+	}, nil)
 
 	s.status = toolkit.NewStatusbar([]string{"", "", "go-pkgx / registry-viewer"})
 
 	// --- box layout ------------------------------------------------------
-	// root: search (fixed) / filter strip (fixed) / tree (flex) / status
-	// (fixed). filterRow: three equal-flex switchers.
+	// root: search (fixed) / filter strip (fixed) / grid (flex) / status
+	// (fixed). filterRow: three equal-flex combo boxes.
 	s.filterRow = toolkit.NewHBox()
 	s.filterRow.Spacing = gap
-	s.filterRow.AddFlex(s.osSwitch, 1)
-	s.filterRow.AddFlex(s.archSwitch, 1)
+	s.filterRow.AddFlex(s.osDrop, 1)
+	s.filterRow.AddFlex(s.archDrop, 1)
 	s.filterRow.AddFlex(s.verDrop, 1)
 
 	s.root = toolkit.NewVBox()
 	s.root.Spacing = gap
 	s.root.AddFixed(s.search, searchH)
-	s.root.AddFixed(s.filterRow, switchH)
-	s.root.AddFlex(s.tree, 1)
+	s.root.AddFixed(s.filterRow, filterH)
+	s.root.AddFlex(s.grid, 1)
 	s.root.AddFixed(s.status, toolkit.StatusbarH)
 	s.root.SetBounds(toolkit.Rect{X: margin, Y: margin, W: w - 2*margin, H: surfaceH - 2*margin})
 
-	// Hit-test order = visual/z order: filters first, then the tree.
-	s.clickables = []toolkit.Widget{s.search, s.osSwitch, s.archSwitch, s.verDrop, s.tree}
+	// Hit-test order = visual/z order: filters first, then the grid.
+	s.clickables = []toolkit.Widget{s.search, s.osDrop, s.archDrop, s.verDrop, s.grid}
 
 	s.rebuild()
 	return s
 }
 
-// versionSep separates a version from its publication date in a version
-// leaf label (e.g. "1.10.0   ·   2026-08-02").
-const versionSep = "   ·   "
-
-// versionLabel formats a version-leaf label: the bare version when it has
-// no known publication date, else "version <sep> date". Keeping the date
-// out when empty avoids a dangling separator on rows the factory could not
-// date.
-func versionLabel(version, published string) string {
-	if published == "" {
-		return version
-	}
-	return version + versionSep + published
+// dropdowns returns the three filter combos in a fixed order, so the
+// popover draw + click routing can iterate them uniformly.
+func (s *state) dropdowns() []*toolkit.DropDown {
+	return []*toolkit.DropDown{s.osDrop, s.archDrop, s.verDrop}
 }
 
-// domainValue maps a ViewSwitcher index to its filter value: index 0
+// domainValue maps a DropDown option index to its filter value: index 0
 // ("All") is the empty "no filter" string; index i>0 is domain[i-1].
 func domainValue(domain []string, i int) string {
 	if i <= 0 || i > len(domain) {
@@ -253,10 +251,10 @@ func (s *state) passes(p pkg) bool {
 	return true
 }
 
-// rebuild recomputes the filtered TreeView (name -> os/arch -> version)
-// and refreshes the Statusbar count. Called on construction and on every
-// filter change. Deterministic: names, os/arch groups and versions are
-// each sorted.
+// rebuild recomputes the filtered TreeTable forest (name -> os/arch ->
+// version, with the publish date in the version leaf's Published cell) and
+// refreshes the Statusbar count. Called on construction and on every filter
+// change. Deterministic: names, os/arch groups and versions are each sorted.
 func (s *state) rebuild() {
 	// name -> "os/arch" -> version -> published date. The registry has one
 	// row per (name, os, arch, version), so a plain assignment (last wins)
@@ -279,16 +277,20 @@ func (s *state) rebuild() {
 	}
 	sort.Strings(names)
 
-	root := &toolkit.TreeNode{Label: "registry", Expanded: true}
+	// Forest of package-name nodes (TreeTable takes a forest, so there is no
+	// synthetic root). Cells[0] is the Package tree column; Cells[1] is the
+	// Published date column — populated only on the version leaves (name +
+	// os/arch rows leave it blank).
+	var forest []*toolkit.TreeTableNode
 	for _, name := range names {
-		nameNode := &toolkit.TreeNode{Label: name, Expanded: true, Data: name}
+		nameNode := &toolkit.TreeTableNode{Cells: []string{name}, Expanded: true}
 		var keys []string
 		for k := range byName[name] {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			platNode := &toolkit.TreeNode{Label: k, Expanded: true, Data: k}
+			platNode := &toolkit.TreeTableNode{Cells: []string{k}, Expanded: true}
 			var vers []string
 			for v := range byName[name][k] {
 				vers = append(vers, v)
@@ -296,15 +298,15 @@ func (s *state) rebuild() {
 			sort.Strings(vers)
 			for _, v := range vers {
 				platNode.Children = append(platNode.Children,
-					&toolkit.TreeNode{Label: versionLabel(v, byName[name][k][v]), Data: v})
+					&toolkit.TreeTableNode{Cells: []string{v, byName[name][k][v]}})
 			}
 			nameNode.Children = append(nameNode.Children, platNode)
 		}
-		root.Children = append(root.Children, nameNode)
+		forest = append(forest, nameNode)
 	}
-	s.tree.Root = root
-	s.tree.Selected = nil
-	s.tree.ScrollRow = 0
+	s.grid.Root = forest
+	s.grid.Selected = nil
+	s.grid.ScrollRow = 0
 
 	total := len(distinct(s.pkgs, func(p pkg) string { return p.Name }))
 	shown := len(names)
@@ -312,37 +314,44 @@ func (s *state) rebuild() {
 	s.status.SetSegment(1, strconv.Itoa(shown)+" shown")
 }
 
-// shownNames returns the package-name nodes currently in the filtered
-// tree (the root's children), in visible order. Used by tests to assert
-// the filter narrows the set to exactly the expected packages.
+// shownNames returns the top-level package-name rows currently in the
+// filtered grid (the forest roots), in visible order. Used by tests to
+// assert the filter narrows the set to exactly the expected packages.
 func (s *state) shownNames() []string {
-	if s.tree.Root == nil {
-		return nil
-	}
-	out := make([]string, 0, len(s.tree.Root.Children))
-	for _, c := range s.tree.Root.Children {
-		out = append(out, c.Label)
+	out := make([]string, 0, len(s.grid.Root))
+	for _, n := range s.grid.Root {
+		out = append(out, cellAt(n, 0))
 	}
 	return out
 }
 
-// visibleRow pairs a node's label with its indentation depth, mirroring
-// what TreeView flattens + paints.
-type visibleRow struct {
-	Label string
-	Depth int
+// cellAt returns node's j-th cell text, or "" when the node carries fewer
+// cells (the same short-row tolerance TreeTable itself applies).
+func cellAt(n *toolkit.TreeTableNode, j int) string {
+	if j < len(n.Cells) {
+		return n.Cells[j]
+	}
+	return ""
 }
 
-// visibleRows reproduces the TreeView's visible (expand-aware) flattened
-// order over the current tree, so a test can predict exactly which label
-// paints at which row index — and thus at which y offset (treeTop +
-// index*rowHeight). Mirrors TreeView.flatten/walkTree, which are
-// unexported.
+// visibleRow captures one flattened grid row: its Package (tree) cell, its
+// Published cell and its indentation depth — everything a test needs to
+// predict which row paints where.
+type visibleRow struct {
+	Label     string
+	Published string
+	Depth     int
+}
+
+// visibleRows reproduces the TreeTable's visible (expand-aware) flattened
+// forest order, so a test can predict exactly which row paints at which
+// body index — and thus at which y offset (bodyTop + index*rowHeight).
+// Mirrors TreeTable.flatten/walk, which are unexported.
 func (s *state) visibleRows() []visibleRow {
 	var out []visibleRow
-	var walk func(n *toolkit.TreeNode, depth int)
-	walk = func(n *toolkit.TreeNode, depth int) {
-		out = append(out, visibleRow{Label: n.Label, Depth: depth})
+	var walk func(n *toolkit.TreeTableNode, depth int)
+	walk = func(n *toolkit.TreeTableNode, depth int) {
+		out = append(out, visibleRow{Label: cellAt(n, 0), Published: cellAt(n, 1), Depth: depth})
 		if !n.Expanded {
 			return
 		}
@@ -350,32 +359,36 @@ func (s *state) visibleRows() []visibleRow {
 			walk(c, depth+1)
 		}
 	}
-	if s.tree.Root != nil {
-		walk(s.tree.Root, 0)
+	for _, n := range s.grid.Root {
+		walk(n, 0)
 	}
 	return out
 }
 
-// rowY returns the surface y-coordinate of the i-th visible tree row
-// (with ScrollRow at 0), so tests can assert a label paints at a precise
-// position.
-func (s *state) rowY(i int) int { return s.tree.Bounds().Y + i*rowHeight }
+// rowY returns the surface y-coordinate of the i-th visible BODY row (with
+// ScrollRow at 0): the grid's top, past the header, plus i row heights. So
+// tests can assert a row paints at a precise position.
+func (s *state) rowY(i int) int {
+	return s.grid.Bounds().Y + toolkit.TreeTableHeaderHeight + i*toolkit.TreeTableRowHeight
+}
 
 // draw paints the whole scene onto buf (an RGBA row-major slice). Buf +
 // s.w/s.h are wrapped in a PixelPainter so the widget code sees only the
 // painter.Painter interface. Background first, then the box layout
-// (search / filters / tree / status).
+// (search / filter combos / grid / status), then any open combo popover.
 func (s *state) draw(buf []byte) {
 	fillBG(buf, s.w, s.h, s.theme.Background)
 	p := painter.NewPixelPainter(buf, s.w, s.h)
 	s.root.Draw(p, s.theme)
-	// The version DropDown's popover floats above the tree (the host owns the
+	// A filter DropDown's popover floats above the grid (the host owns the
 	// popover surface): a ListBox of the options at PopoverBounds.
-	if s.verDrop.Open {
-		lb := toolkit.NewListBox(s.verDrop.Options)
-		lb.Selected = s.verDrop.Selected
-		lb.SetBounds(s.verDrop.PopoverBounds())
-		lb.Draw(p, s.theme)
+	for _, d := range s.dropdowns() {
+		if d.Open {
+			lb := toolkit.NewListBox(d.Options)
+			lb.Selected = d.Selected
+			lb.SetBounds(d.PopoverBounds())
+			lb.Draw(p, s.theme)
+		}
 	}
 }
 
@@ -386,16 +399,18 @@ func (s *state) draw(buf []byte) {
 func (s *state) handleClick(x, y int) bool {
 	ev := toolkit.Event{Kind: toolkit.EventClick, X: x, Y: y}
 
-	// Open version popover first (it floats above everything): a click inside
-	// selects that option row; a click outside dismisses it.
-	if s.verDrop.Open {
-		pb := s.verDrop.PopoverBounds()
-		if inside(x, y, pb) {
-			s.verDrop.Select((y - pb.Y) / dropDownRowH)
-		} else {
-			s.verDrop.Open = false
+	// An open combo popover floats above everything: a click inside selects
+	// that option row; a click outside dismisses it.
+	for _, d := range s.dropdowns() {
+		if d.Open {
+			pb := d.PopoverBounds()
+			if inside(x, y, pb) {
+				d.Select((y - pb.Y) / dropDownRowH)
+			} else {
+				d.Open = false
+			}
+			return true
 		}
-		return true
 	}
 
 	for _, w := range s.clickables {

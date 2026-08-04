@@ -6,11 +6,13 @@
 // RGBA byte buffer rendered through painter.NewPixelPainter.
 //
 // The assertions are position-precise: they compute the exact surface
-// rectangles the box layout produces (search box, filter strip, tree)
-// and the exact y-offset of each tree row (treeTop + index*rowHeight),
-// then verify the SELECTED-row Accent band paints at that y — tying the
-// filtered model directly to real pixels. Filter tests assert the tree's
-// visible package-name set shrinks to the exact expected packages.
+// rectangles the box layout produces (search box, filter-combo strip,
+// TreeTable grid) and the exact y-offset of each grid BODY row
+// (gridTop + header + index*rowHeight), then verify the SELECTED-row
+// Accent band, the header band, the column separator and a dated
+// Published cell all paint where the model says — tying the filtered
+// model directly to real pixels. Filter tests assert the grid's visible
+// package set shrinks to the exact expected packages.
 
 package main
 
@@ -26,6 +28,11 @@ import (
 	"github.com/go-widgets/toolkit"
 )
 
+// scrollbarW mirrors the toolkit's unexported scroll.go scrollbarWidth (8):
+// the grid is windowed (32 flattened rows > ~19 visible), so its body width
+// is Bounds().W - scrollbarW.
+const scrollbarW = 8
+
 func newSurface() []byte { return make([]byte, 4*surfaceW*surfaceH) }
 
 func px(surf []byte, x, y int) toolkit.RGBA {
@@ -34,6 +41,30 @@ func px(surf []byte, x, y int) toolkit.RGBA {
 }
 
 func eqColor(a, b toolkit.RGBA) bool { return a.R == b.R && a.G == b.G && a.B == b.B }
+
+// gridGeom returns the grid's body width, the Package (col 0) width and the
+// x of the column separator, computed from the layout the same way the
+// TreeTable does (fixed Published column, auto Package column).
+func gridGeom(s *state) (bodyW, col0W, sepX int) {
+	r := s.grid.Bounds()
+	bodyW = r.W - scrollbarW // windowed
+	col0W = bodyW - gridPubColW
+	sepX = r.X + col0W
+	return
+}
+
+// hasInkIn reports whether any pixel in the [x0,x1)×[y0,y1) band differs
+// from bg (i.e. some text/glyph was painted there).
+func hasInkIn(surf []byte, x0, x1, y0, y1 int, bg toolkit.RGBA) bool {
+	for y := y0; y < y1; y++ {
+		for x := x0; x < x1; x++ {
+			if !eqColor(px(surf, x, y), bg) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // --- construction ---------------------------------------------------------
 
@@ -51,8 +82,15 @@ func TestNewStateParsesEmbeddedSample(t *testing.T) {
 	if got := s.archDomain; !reflect.DeepEqual(got, []string{"amd64", "arm64"}) {
 		t.Fatalf("archDomain = %v, want [amd64 arm64]", got)
 	}
-	if s.search == nil || s.osSwitch == nil || s.archSwitch == nil || s.verDrop == nil || s.tree == nil || s.status == nil {
+	if s.search == nil || s.osDrop == nil || s.archDrop == nil || s.verDrop == nil || s.grid == nil || s.status == nil {
 		t.Fatal("newState left a core widget nil")
+	}
+	// The grid has the two columns: Package (tree) + Published (date).
+	if len(s.grid.Columns) != 2 || s.grid.Columns[0].Title != "Package" || s.grid.Columns[1].Title != "Published" {
+		t.Fatalf("grid columns = %+v, want [Package][Published]", s.grid.Columns)
+	}
+	if s.grid.Columns[1].Width != gridPubColW {
+		t.Fatalf("Published column width = %d, want %d", s.grid.Columns[1].Width, gridPubColW)
 	}
 	// Five distinct packages in the sample.
 	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"hugo", "jq", "lz4", "ripgrep", "zstd"}) {
@@ -86,48 +124,45 @@ func TestLayoutRectsArePrecise(t *testing.T) {
 
 	// Filter strip sits below the search box: Y = margin + searchH + gap.
 	wantStripY := margin + searchH + gap // 8 + 26 + 6 = 40
-	if got := s.filterRow.Bounds(); got.Y != wantStripY || got.H != switchH || got.X != margin {
-		t.Fatalf("filter strip rect = %+v, want Y=%d H=%d X=%d", got, wantStripY, switchH, margin)
+	if got := s.filterRow.Bounds(); got.Y != wantStripY || got.H != filterH || got.X != margin {
+		t.Fatalf("filter strip rect = %+v, want Y=%d H=%d X=%d", got, wantStripY, filterH, margin)
 	}
-	// Three switchers, left-to-right, inside the strip, same Y/H as the strip.
-	os, ar, ve := s.osSwitch.Bounds(), s.archSwitch.Bounds(), s.verDrop.Bounds()
+	// Three combos, left-to-right, inside the strip, same Y/H as the strip.
+	os, ar, ve := s.osDrop.Bounds(), s.archDrop.Bounds(), s.verDrop.Bounds()
 	if !(os.X < ar.X && ar.X < ve.X) {
-		t.Fatalf("switchers not left-to-right: os.X=%d arch.X=%d ver.X=%d", os.X, ar.X, ve.X)
+		t.Fatalf("combos not left-to-right: os.X=%d arch.X=%d ver.X=%d", os.X, ar.X, ve.X)
 	}
 	if os.Y != wantStripY || ar.Y != wantStripY || ve.Y != wantStripY {
-		t.Fatalf("switcher Y mismatch: %d %d %d, want %d", os.Y, ar.Y, ve.Y, wantStripY)
+		t.Fatalf("combo Y mismatch: %d %d %d, want %d", os.Y, ar.Y, ve.Y, wantStripY)
 	}
 
-	// Tree: Y = margin + searchH + gap + switchH + gap; fills to the status bar.
-	wantTreeY := margin + searchH + gap + switchH + gap // 8+26+6+28+6 = 74
-	wantTreeH := (surfaceH - 2*margin) - (searchH + switchH + toolkit.StatusbarH) - 3*gap
-	wantTree := toolkit.Rect{X: margin, Y: wantTreeY, W: surfaceW - 2*margin, H: wantTreeH}
-	if got := s.tree.Bounds(); got != wantTree {
-		t.Fatalf("tree rect = %+v, want %+v", got, wantTree)
+	// Grid: Y = margin + searchH + gap + filterH + gap; fills to the status bar.
+	wantGridY := margin + searchH + gap + filterH + gap // 8+26+6+28+6 = 74
+	wantGridH := (surfaceH - 2*margin) - (searchH + filterH + toolkit.StatusbarH) - 3*gap
+	wantGrid := toolkit.Rect{X: margin, Y: wantGridY, W: surfaceW - 2*margin, H: wantGridH}
+	if got := s.grid.Bounds(); got != wantGrid {
+		t.Fatalf("grid rect = %+v, want %+v", got, wantGrid)
 	}
 }
 
 // --- render: model row index -> exact pixel y ----------------------------
 
-// TestVisibleRowsMatchDefaultTree asserts the flattened visible order of
-// the default (all-expanded) tree, giving each label a known row index
-// and therefore a known y-offset.
-func TestVisibleRowsMatchDefaultTree(t *testing.T) {
+// TestVisibleRowsMatchDefaultGrid asserts the flattened visible order of the
+// default (all-expanded) forest, giving each row a known body index and thus
+// a known y-offset. The publish date lives in each version leaf's Published
+// cell (not appended to the version text); the hugo/linux-amd64 0.128.0 leaf
+// has an EMPTY date, exercising the blank-cell path.
+func TestVisibleRowsMatchDefaultGrid(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	rows := s.visibleRows()
-	// The first rows are deterministic: root, then the first package
-	// (hugo) and its os/arch -> version subtree. Version leaves carry the
-	// publication date after a "   ·   " separator when the row has one;
-	// hugo/linux/amd64 0.128.0 has an EMPTY published date in the sample, so
-	// that leaf shows the bare version — exercising both label branches.
+	// No synthetic root — package names are the top-level forest (depth 0).
 	want := []visibleRow{
-		{"registry", 0},
-		{"hugo", 1},
-		{"darwin/arm64", 2},
-		{"0.129.0" + versionSep + "2026-08-03", 3},
-		{"linux/amd64", 2},
-		{"0.128.0", 3}, // empty published -> bare version, no separator
-		{"jq", 1},
+		{"hugo", "", 0},
+		{"darwin/arm64", "", 1},
+		{"0.129.0", "2026-08-03", 2},
+		{"linux/amd64", "", 1},
+		{"0.128.0", "", 2}, // empty published cell
+		{"jq", "", 0},
 	}
 	if len(rows) < len(want) {
 		t.Fatalf("only %d visible rows, want at least %d", len(rows), len(want))
@@ -137,33 +172,22 @@ func TestVisibleRowsMatchDefaultTree(t *testing.T) {
 			t.Fatalf("visible row %d = %+v, want %+v", i, rows[i], w)
 		}
 	}
-	// Row y math: hugo is index 1 -> treeTop + 18, jq is index 6.
-	if got := s.rowY(1); got != s.tree.Bounds().Y+1*rowHeight {
-		t.Fatalf("rowY(1) = %d, want %d", got, s.tree.Bounds().Y+rowHeight)
+	// Row y math: body row i sits at gridTop + header + i*rowHeight.
+	wantY := s.grid.Bounds().Y + toolkit.TreeTableHeaderHeight + 2*toolkit.TreeTableRowHeight
+	if got := s.rowY(2); got != wantY {
+		t.Fatalf("rowY(2) = %d, want %d", got, wantY)
 	}
 }
 
-// TestVersionLabel covers both label branches: a dated version and an
-// undated one.
-func TestVersionLabel(t *testing.T) {
-	if got := versionLabel("1.10.0", "2026-08-02"); got != "1.10.0"+versionSep+"2026-08-02" {
-		t.Fatalf("dated label = %q", got)
-	}
-	if got := versionLabel("0.128.0", ""); got != "0.128.0" {
-		t.Fatalf("undated label = %q, want bare version", got)
-	}
-}
-
-// TestVersionLeafCarriesPublishedDate walks the filtered tree and asserts a
-// specific version leaf carries its publication date, and that the empty-date
-// leaf carries none — so the date is threaded from the model through the
-// TreeView labels the WASM view paints.
+// TestVersionLeafCarriesPublishedDate walks the filtered grid and asserts a
+// specific version leaf's Cells = [version, date], and that the empty-date
+// leaf's Published cell is blank — the date threaded from the model into the
+// TreeTable cells the WASM view paints.
 func TestVersionLeafCarriesPublishedDate(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
-	// Find lz4 -> linux/amd64 -> 1.10.0 (published 2026-08-02).
-	var lz4 *toolkit.TreeNode
-	for _, n := range s.tree.Root.Children {
-		if n.Label == "lz4" {
+	var lz4 *toolkit.TreeTableNode
+	for _, n := range s.grid.Root {
+		if cellAt(n, 0) == "lz4" {
 			lz4 = n
 		}
 	}
@@ -172,14 +196,14 @@ func TestVersionLeafCarriesPublishedDate(t *testing.T) {
 	}
 	found := false
 	for _, plat := range lz4.Children {
-		if plat.Label != "linux/amd64" {
+		if cellAt(plat, 0) != "linux/amd64" {
 			continue
 		}
 		for _, leaf := range plat.Children {
-			if leaf.Data == "1.10.0" {
+			if cellAt(leaf, 0) == "1.10.0" {
 				found = true
-				if leaf.Label != "1.10.0"+versionSep+"2026-08-02" {
-					t.Fatalf("lz4 1.10.0 leaf label = %q, want dated", leaf.Label)
+				if cellAt(leaf, 1) != "2026-08-02" {
+					t.Fatalf("lz4 1.10.0 Published cell = %q, want 2026-08-02", cellAt(leaf, 1))
 				}
 			}
 		}
@@ -187,57 +211,97 @@ func TestVersionLeafCarriesPublishedDate(t *testing.T) {
 	if !found {
 		t.Fatal("lz4 linux/amd64 1.10.0 leaf not found")
 	}
-	// The undated hugo 0.128.0 leaf must show the bare version (Data holds the
-	// version; Label omits any separator).
-	for _, n := range s.tree.Root.Children {
-		if n.Label != "hugo" {
+	// hugo 0.128.0 leaf: empty Published cell.
+	for _, n := range s.grid.Root {
+		if cellAt(n, 0) != "hugo" {
 			continue
 		}
 		for _, plat := range n.Children {
 			for _, leaf := range plat.Children {
-				if leaf.Data == "0.128.0" && leaf.Label != "0.128.0" {
-					t.Fatalf("undated hugo 0.128.0 leaf label = %q, want bare version", leaf.Label)
+				if cellAt(leaf, 0) == "0.128.0" && cellAt(leaf, 1) != "" {
+					t.Fatalf("undated hugo 0.128.0 Published cell = %q, want empty", cellAt(leaf, 1))
 				}
 			}
 		}
 	}
 }
 
-// TestSelectedRowPaintsAccentAtExpectedY selects the "hugo" package node
-// (visible index 1), renders, and asserts the Accent selection band lands
-// exactly at treeTop + 1*rowHeight — and that neighbouring rows (the
-// root at index 0, "jq" at index 6) do NOT carry the Accent fill. This
-// binds the model's row index to a real pixel position.
+// TestGridHeaderAndColumnsPaint asserts the pixel-level grid chrome: the
+// header band (SurfaceAlt) at the grid top, the column separator (Border) at
+// the computed Package/Published boundary, and that a dated version leaf
+// paints INK in its Published column while the undated leaf's Published
+// column stays blank — proving the date renders in its own column, at the row
+// the model predicts.
+func TestGridHeaderAndColumnsPaint(t *testing.T) {
+	s := newState(surfaceW, surfaceH, nil)
+	theme := s.theme
+	surf := newSurface()
+	s.draw(surf)
+
+	r := s.grid.Bounds()
+	bodyW, col0W, sepX := gridGeom(s)
+	_ = bodyW
+
+	// Header band: SurfaceAlt across the header height (sample an empty spot in
+	// the Package header, right of the "Package" title text).
+	if got := px(surf, r.X+col0W-24, r.Y+3); !eqColor(got, theme.SurfaceAlt) {
+		t.Fatalf("header band pixel = %+v, want SurfaceAlt %+v", got, theme.SurfaceAlt)
+	}
+	// Column separator: a 1px Border line at sepX spanning the grid height.
+	if got := px(surf, sepX, r.Y+3); !eqColor(got, theme.Border) {
+		t.Fatalf("column separator at x=%d = %+v, want Border %+v", sepX, got, theme.Border)
+	}
+
+	// Published column band, excluding the separator column and the scrollbar.
+	pubX0, pubX1 := sepX+2, r.X+col0W+gridPubColW-1
+
+	// Dated leaf (visible index 2 = hugo darwin/arm64 0.129.0, 2026-08-03):
+	// its Published column must carry ink.
+	datedY := s.rowY(2)
+	if !hasInkIn(surf, pubX0, pubX1, datedY+2, datedY+toolkit.TreeTableRowHeight-2, theme.Surface) {
+		t.Fatalf("dated row at y=%d shows NO ink in the Published column [%d,%d)", datedY, pubX0, pubX1)
+	}
+	// Undated leaf (visible index 4 = hugo linux/amd64 0.128.0, ""): its
+	// Published column must be blank (only the row's Surface fill).
+	undatedY := s.rowY(4)
+	if hasInkIn(surf, pubX0, pubX1, undatedY+2, undatedY+toolkit.TreeTableRowHeight-2, theme.Surface) {
+		t.Fatalf("undated row at y=%d unexpectedly shows ink in the Published column", undatedY)
+	}
+}
+
+// TestSelectedRowPaintsAccentAtExpectedY selects the "hugo" row (body index
+// 0), renders, and asserts the Accent selection band lands exactly at the
+// grid's first body row — and that the header band and an unselected row do
+// NOT carry the Accent fill. Binds the model's row index to a real pixel y.
 func TestSelectedRowPaintsAccentAtExpectedY(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	theme := s.theme
-	hugo := s.tree.Root.Children[0]
-	if hugo.Label != "hugo" {
-		t.Fatalf("first package node = %q, want hugo", hugo.Label)
+	hugo := s.grid.Root[0]
+	if cellAt(hugo, 0) != "hugo" {
+		t.Fatalf("first package row = %q, want hugo", cellAt(hugo, 0))
 	}
-	s.tree.Selected = hugo
+	s.grid.Selected = hugo
 
 	surf := newSurface()
 	s.draw(surf)
 
-	treeX := s.tree.Bounds().X
-	// hugo row (index 1): its background must be Accent.
-	hugoY := s.rowY(1)
-	if got := px(surf, treeX+1, hugoY+2); !eqColor(got, theme.Accent) {
+	gx := s.grid.Bounds().X
+	// hugo row (body index 0): background must be Accent.
+	hugoY := s.rowY(0)
+	if got := px(surf, gx+1, hugoY+4); !eqColor(got, theme.Accent) {
 		t.Fatalf("selected hugo row at y=%d: pixel %+v, want Accent %+v", hugoY, got, theme.Accent)
 	}
-	// root row (index 0): NOT selected -> Surface fill, never Accent.
-	rootY := s.rowY(0)
-	if got := px(surf, treeX+1, rootY+2); eqColor(got, theme.Accent) {
-		t.Fatalf("root row at y=%d unexpectedly Accent-filled: %+v", rootY, got)
+	// Header band (above body): SurfaceAlt, never Accent.
+	if got := px(surf, gx+1, s.grid.Bounds().Y+3); eqColor(got, theme.Accent) {
+		t.Fatalf("header band unexpectedly Accent-filled: %+v", got)
 	}
-	if got := px(surf, treeX+1, rootY+2); !eqColor(got, theme.Surface) {
-		t.Fatalf("root row at y=%d: pixel %+v, want Surface %+v", rootY, got, theme.Surface)
-	}
-	// jq row (index 6): also unselected -> Surface, not Accent.
-	jqY := s.rowY(6)
-	if got := px(surf, treeX+1, jqY+2); eqColor(got, theme.Accent) {
+	// jq row (body index 5): unselected -> Surface, not Accent.
+	jqY := s.rowY(5)
+	if got := px(surf, gx+1, jqY+4); eqColor(got, theme.Accent) {
 		t.Fatalf("jq row at y=%d unexpectedly Accent-filled: %+v", jqY, got)
+	}
+	if got := px(surf, gx+1, jqY+4); !eqColor(got, theme.Surface) {
+		t.Fatalf("jq row at y=%d: pixel %+v, want Surface %+v", jqY, got, theme.Surface)
 	}
 }
 
@@ -276,11 +340,11 @@ func TestNameFilterReducesToExpectedSet(t *testing.T) {
 	}
 }
 
-func TestOSFilterNarrowsTree(t *testing.T) {
+func TestOSFilterNarrowsGrid(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	// osDomain = [darwin linux windows]; "windows" is domain index 2 ->
-	// switcher segment 3.
-	s.osSwitch.OnChange(3)
+	// DropDown option 3.
+	s.osDrop.Select(3)
 	if s.osFilter != "windows" {
 		t.Fatalf("osFilter = %q, want windows", s.osFilter)
 	}
@@ -288,7 +352,7 @@ func TestOSFilterNarrowsTree(t *testing.T) {
 		t.Fatalf("os=windows -> %v, want [ripgrep zstd]", got)
 	}
 	// Back to All.
-	s.osSwitch.OnChange(0)
+	s.osDrop.Select(0)
 	if s.osFilter != "" {
 		t.Fatalf("osFilter after All = %q, want empty", s.osFilter)
 	}
@@ -297,9 +361,8 @@ func TestOSFilterNarrowsTree(t *testing.T) {
 	}
 }
 
-func TestVersionFilterNarrowsTree(t *testing.T) {
+func TestVersionFilterNarrowsGrid(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
-	// Find the DropDown option index for version "1.10.0".
 	idx := -1
 	for i, v := range s.verDomain {
 		if v == "1.10.0" {
@@ -318,17 +381,16 @@ func TestVersionFilterNarrowsTree(t *testing.T) {
 	}
 }
 
-// TestVersionDropDownPopoverRouting opens the version DropDown via a real
-// handleClick, renders the popover, selects an option through a popover
-// click, and confirms an outside click dismisses it — exercising the
-// host-owned popover draw + click routing.
-func TestVersionDropDownPopoverRouting(t *testing.T) {
+// TestDropDownPopoverRouting opens the version combo via a real handleClick,
+// renders the popover, selects an option through a popover click, and
+// confirms an outside click dismisses it — exercising the shared host-owned
+// popover draw + click routing (which serves all three combos).
+func TestDropDownPopoverRouting(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	dr := s.verDrop.Bounds()
-	// Click the control to open it.
 	s.handleClick(dr.X+dr.W/2, dr.Y+dr.H/2)
 	if !s.verDrop.Open {
-		t.Fatal("clicking the version DropDown should open its popover")
+		t.Fatal("clicking the version combo should open its popover")
 	}
 	s.draw(newSurface()) // renders the popover branch (must not panic)
 
@@ -344,7 +406,7 @@ func TestVersionDropDownPopoverRouting(t *testing.T) {
 	// Reopen, then dismiss with an outside click.
 	s.handleClick(dr.X+dr.W/2, dr.Y+dr.H/2)
 	if !s.verDrop.Open {
-		t.Fatal("version DropDown should reopen")
+		t.Fatal("version combo should reopen")
 	}
 	s.handleClick(1, 1) // top-left, well outside the popover
 	if s.verDrop.Open {
@@ -355,8 +417,8 @@ func TestVersionDropDownPopoverRouting(t *testing.T) {
 func TestCombinedFiltersAND(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	s.search.OnChange("lz4")
-	// archDomain = [amd64 arm64]; "arm64" -> domain index 1 -> segment 2.
-	s.archSwitch.OnChange(2)
+	// archDomain = [amd64 arm64]; "arm64" -> domain index 1 -> option 2.
+	s.archDrop.Select(2)
 	if s.archFilter != "arm64" {
 		t.Fatalf("archFilter = %q, want arm64", s.archFilter)
 	}
@@ -366,7 +428,7 @@ func TestCombinedFiltersAND(t *testing.T) {
 	// Under lz4, only arm64 os/arch groups should remain (darwin/arm64,
 	// linux/arm64); no amd64 group survives the AND.
 	for _, r := range s.visibleRows() {
-		if r.Depth == 2 && (r.Label == "linux/amd64") {
+		if r.Depth == 1 && r.Label == "linux/amd64" {
 			t.Fatalf("amd64 group leaked past the arm64 filter: %+v", r)
 		}
 	}
@@ -434,17 +496,32 @@ func TestClickClearAffordanceResetsFilter(t *testing.T) {
 	}
 }
 
-func TestClickSwitcherSegmentRoutes(t *testing.T) {
+func TestClickComboMovesFocusOffSearch(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
-	r := s.osSwitch.Bounds()
-	segW := r.W / 4 // All + 3 os values
-	// Click segment 3 ("windows").
-	s.handleClick(r.X+segW*3+segW/2, r.Y+r.H/2)
-	if s.osFilter != "windows" {
-		t.Fatalf("clicking os segment 3 set osFilter=%q, want windows", s.osFilter)
+	// Focus the search first.
+	sr := s.search.Bounds()
+	s.handleClick(sr.X+30, sr.Y+sr.H/2)
+	if !s.search.Focused {
+		t.Fatal("precondition: search should be focused")
 	}
-	if s.keyTarget != toolkit.Widget(s.osSwitch) || s.search.Focused {
-		t.Fatal("clicking a switcher should move focus off the search box")
+	// Click the os combo: it opens and takes focus off the search.
+	r := s.osDrop.Bounds()
+	s.handleClick(r.X+r.W/2, r.Y+r.H/2)
+	if !s.osDrop.Open {
+		t.Fatal("clicking the os combo should open it")
+	}
+	if s.keyTarget != toolkit.Widget(s.osDrop) || s.search.Focused {
+		t.Fatal("clicking a combo should move keyboard focus off the search box")
+	}
+}
+
+func TestClickGridSelectsRow(t *testing.T) {
+	s := newState(surfaceW, surfaceH, nil)
+	// Click the first body row (body index 0 = hugo) past the chevron.
+	y := s.rowY(0) + toolkit.TreeTableRowHeight/2
+	s.handleClick(s.grid.Bounds().X+toolkit.TreeChevronW+30, y)
+	if s.grid.Selected == nil || cellAt(s.grid.Selected, 0) != "hugo" {
+		t.Fatalf("clicking the first grid row should select hugo; Selected=%v", s.grid.Selected)
 	}
 }
 
@@ -493,14 +570,24 @@ func TestDomainValueEdges(t *testing.T) {
 	}
 }
 
-func TestShownNamesAndVisibleRowsNilRoot(t *testing.T) {
+func TestCellAtShortRow(t *testing.T) {
+	n := &toolkit.TreeTableNode{Cells: []string{"only-one"}}
+	if cellAt(n, 0) != "only-one" {
+		t.Fatal("cellAt(0) should return the present cell")
+	}
+	if cellAt(n, 1) != "" {
+		t.Fatal("cellAt past the end should return empty (short-row tolerance)")
+	}
+}
+
+func TestShownNamesAndVisibleRowsEmptyForest(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
-	s.tree.Root = nil
-	if s.shownNames() != nil {
-		t.Fatal("shownNames with nil root should be nil")
+	s.grid.Root = nil
+	if got := s.shownNames(); len(got) != 0 {
+		t.Fatalf("shownNames with empty forest = %v, want empty", got)
 	}
 	if s.visibleRows() != nil {
-		t.Fatal("visibleRows with nil root should be nil")
+		t.Fatal("visibleRows with empty forest should be nil")
 	}
 }
 
@@ -545,13 +632,13 @@ func TestInsideAndLocalHelpers(t *testing.T) {
 // --- PNG dump (visual verification hook) ----------------------------------
 
 // TestRenderDumpsPNG renders the default scene and writes testdata/render.png
-// so the layout is inspectable, asserting it is a non-trivial image of the
-// expected dimensions. When GO_PKGX_DUMP_PNG names a directory the PNG lands
-// there too.
+// so the grid + columns + dates are inspectable, asserting it is a non-trivial
+// image of the expected dimensions. When GO_PKGX_DUMP_PNG names a directory
+// the PNG lands there too.
 func TestRenderDumpsPNG(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
-	// Select a node so the render also shows the Accent selection band.
-	s.tree.Selected = s.tree.Root.Children[0]
+	// Select the first row so the render also shows the Accent selection band.
+	s.grid.Selected = s.grid.Root[0]
 	surf := newSurface()
 	s.draw(surf)
 

@@ -37,13 +37,16 @@
   #filters input, #filters select { background: #11151f; color: #e6e8f0; border: 1px solid #262c40; border-radius: 8px; padding: 7px 10px; font: inherit; }
   #filters input { flex: 1 1 200px; }
   #count { color: #9aa0b4; font-size: .85rem; margin: 0 0 10px; }
-  #tree details { border-left: 1px solid #262c40; margin: 0 0 0 6px; padding-left: 12px; }
-  #tree > details { border-left: 0; padding-left: 0; }
-  #tree summary { cursor: pointer; padding: 2px 0; }
-  #tree .pkg { font-weight: 600; }
-  #tree .plat { color: #9aa0b4; }
-  #tree .ver { color: #cfe9e4; font-family: ui-monospace, Menlo, Consolas, monospace; padding: 1px 0 1px 18px; }
-  #tree .date { color: #7d8598; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  /* Tree-grid table mirroring the canvas TreeTable: a Package tree column
+     (indented rows) + a right-aligned Published date column. */
+  #grid { width: 100%; border-collapse: collapse; }
+  #grid th { position: sticky; top: 0; background: #11151f; color: #9aa0b4; font-weight: 600; text-align: left; padding: 7px 10px; border-bottom: 1px solid #262c40; }
+  #grid th.pubcol { text-align: right; width: 132px; }
+  #grid td { padding: 2px 10px; border-bottom: 1px solid #171b26; white-space: nowrap; }
+  #grid td.pubcol { text-align: right; color: #7d8598; font-variant-numeric: tabular-nums; }
+  #grid tr.lvl0 td.pkg { font-weight: 600; }
+  #grid tr.lvl1 td.pkg { color: #9aa0b4; }
+  #grid tr.lvl2 td.pkg { color: #cfe9e4; font-family: ui-monospace, Menlo, Consolas, monospace; }
 </style>
 </head>
 <body>
@@ -139,24 +142,33 @@
           if (!m.has(pl)) m.set(pl, new Map()); // version -> published date
           m.get(pl).set(r.version, r.published || "");
         }
+        // Render a tree-grid table (indented Package column + Published date
+        // column) mirroring the canvas TreeTable. Dates go in their own cell.
         const tree = el("tree"); tree.textContent = "";
+        const table = document.createElement("table"); table.id = "grid";
+        const thead = document.createElement("thead");
+        const htr = document.createElement("tr");
+        const th0 = document.createElement("th"); th0.textContent = "Package";
+        const th1 = document.createElement("th"); th1.className = "pubcol"; th1.textContent = "Published";
+        htr.appendChild(th0); htr.appendChild(th1); thead.appendChild(htr); table.appendChild(thead);
+        const tbody = document.createElement("tbody");
+        const addRow = (depth, label, pub) => {
+          const tr = document.createElement("tr"); tr.className = "lvl" + depth;
+          const tp = document.createElement("td"); tp.className = "pkg";
+          tp.style.paddingLeft = (10 + depth * 18) + "px"; tp.textContent = label;
+          const td = document.createElement("td"); td.className = "pubcol"; td.textContent = pub || "";
+          tr.appendChild(tp); tr.appendChild(td); tbody.appendChild(tr);
+        };
         for (const name of [...byName.keys()].sort()) {
-          const d = document.createElement("details"); if (byName.size <= 40) d.open = true;
-          const s = document.createElement("summary"); s.innerHTML = '<span class="pkg"></span>';
-          s.firstChild.textContent = name; d.appendChild(s);
+          addRow(0, name, "");
           for (const pl of [...byName.get(name).keys()].sort()) {
-            const pd = document.createElement("details"); pd.open = true;
-            const ps = document.createElement("summary"); ps.className = "plat"; ps.textContent = pl; pd.appendChild(ps);
+            addRow(1, pl, "");
             for (const v of [...byName.get(name).get(pl).keys()].sort()) {
-              const vv = document.createElement("div"); vv.className = "ver"; vv.textContent = v;
-              const pub = byName.get(name).get(pl).get(v);
-              if (pub) { const sp = document.createElement("span"); sp.className = "date"; sp.textContent = "  ·  " + pub; vv.appendChild(sp); }
-              pd.appendChild(vv);
+              addRow(2, v, byName.get(name).get(pl).get(v));
             }
-            d.appendChild(pd);
           }
-          tree.appendChild(d);
         }
+        table.appendChild(tbody); tree.appendChild(table);
         el("count").textContent = byName.size + " package" + (byName.size === 1 ? "" : "s") + " · " + shown.length + " platform build" + (shown.length === 1 ? "" : "s") + " shown";
       }
       async function show(reason) {
