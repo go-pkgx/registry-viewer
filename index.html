@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>go-pkgx registry viewer — live wasm demo</title>
+<meta name="description" content="A filterable tree view of the go-pkgx package registry (name -> os/arch -> version), rendered into a browser canvas with go-widgets/toolkit.">
+<style>
+  html, body { margin: 0; background: #0b0d12; color: #e6e8f0; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 24px 20px; text-align: center; }
+  h1 { font-size: 1.6rem; letter-spacing: -.02em; margin: 0 0 6px; }
+  .tagline { color: #9aa0b4; margin: 0 0 22px; }
+  #screen { display: block; margin: 0 auto; background: #ffffff; border: 1px solid #262c40; border-radius: 12px; max-width: 100%; height: auto; cursor: pointer; box-shadow: 0 12px 40px rgba(20,184,166,.15); }
+  /* "Full window" (NOT the OS Fullscreen API): a fixed overlay that fills the
+     browser window's viewport. The canvas keeps its aspect (width:100%,
+     height:auto), so the mouse mapping in main.go — which scales uniformly via
+     getBoundingClientRect — stays exact. */
+  #fswrap { position: fixed; inset: 0; z-index: 9999; overflow: auto; background: #0b0d12; display: none; }
+  #fswrap.open { display: block; }
+  #screen.maxi { max-width: none; width: 100vw; height: auto; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
+  #fsbtn { display: block; margin: 14px auto 0; padding: 8px 16px; background: #14b8a6; color: #04201c; border: 0; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; }
+  #fsbtn:hover { background: #12a394; }
+  .hint { color: #9aa0b4; font-size: .9rem; margin: 14px 0 24px; }
+  #err { color: #ff5f57; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .85rem; white-space: pre-wrap; }
+  a { color: #14b8a6; }
+  footer { color: #9aa0b4; text-align: center; padding: 14px 0 40px; font-size: .85rem; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>go-pkgx registry viewer</h1>
+    <p class="tagline">A filterable tree view of the <a href="https://github.com/go-pkgx">go-pkgx</a> package registry, in pure-Go wasm.</p>
+    <canvas id="screen" width="720" height="560"></canvas>
+    <button id="fsbtn" type="button">⛶ Full window</button>
+    <p class="hint">The registry is grouped <strong>name → os/arch → version</strong>. Type in the search box to filter by <strong>package name</strong> (case-insensitive, live), and use the three segmented controls to filter by <strong>os</strong>, <strong>arch</strong> and <strong>version</strong> — the filters combine with AND, and the status bar shows the live count. Click a tree row's chevron to expand or collapse it. Data is fetched from <code>registry.json</code>; if that fetch fails, a bundled sample is shown. Rendered entirely by <a href="https://github.com/go-widgets/toolkit">go-widgets/toolkit</a> (SearchEntry, ViewSwitcher, TreeView, VBox/HBox) onto a canvas. Press <strong>⛶ Full window</strong> (or double-click the canvas) to expand it — <kbd>Esc</kbd> exits.</p>
+    <div id="err"></div>
+    <p><a href="https://github.com/go-pkgx">go-pkgx</a> · <a href="https://github.com/go-pkgx/registry-viewer">source</a></p>
+  </div>
+  <footer>BSD-3-Clause · pure Go · CGO=0</footer>
+  <div id="fswrap"></div>
+  <script>
+    // "Full window" toggle — a fixed overlay filling the browser window's
+    // viewport, NOT the OS Fullscreen API. Enter: move the canvas into a
+    // fixed, scrollable overlay. Exit: put it back. The canvas element (and
+    // its 2D context) survive the DOM move, so rendering and click-mapping
+    // continue unbroken. Esc or the button/double-click exit.
+    (() => {
+      const screen = document.getElementById("screen");
+      const wrap = document.getElementById("fswrap");
+      const btn = document.getElementById("fsbtn");
+      const home = screen.parentNode; // .wrap — restore target
+      const on = () => screen.classList.contains("maxi");
+      const enter = () => {
+        wrap.appendChild(screen);
+        screen.classList.add("maxi"); wrap.classList.add("open");
+        document.body.classList.add("maxi-open");
+        btn.textContent = "⤢ Exit full window";
+      };
+      const exit = () => {
+        home.insertBefore(screen, btn); // back to its slot, before the button
+        screen.classList.remove("maxi"); wrap.classList.remove("open");
+        document.body.classList.remove("maxi-open");
+        btn.textContent = "⛶ Full window";
+      };
+      const toggle = () => on() ? exit() : enter();
+      btn.textContent = "⛶ Full window";
+      btn.addEventListener("click", toggle);
+      screen.addEventListener("dblclick", toggle);
+      document.addEventListener("keydown", (e) => { if (e.key === "Escape" && on()) exit(); });
+    })();
+  </script>
+  <script>
+    // Defensive Go-wasm fs guard. Go's syscall/fs_js.go reads globalThis.fs
+    // (constants + writeSync) at init; wasm_exec.js only installs its fallback
+    // when globalThis.fs is absent. A named DOM element whose id shadows `fs`
+    // (or a browser quirk) can leave fs present-but-incomplete, which panics
+    // the runtime and blanks the canvas. Fill in only what's missing. Element
+    // ids on this page deliberately avoid "fs"/"process"/"path" (fswrap/fsbtn
+    // are safe).
+    (() => {
+      const g = globalThis;
+      if (!g.fs || typeof g.fs.writeSync !== "function") {
+        let buf = ""; const dec = new TextDecoder("utf-8");
+        g.fs = {
+          constants: { O_WRONLY: -1, O_RDWR: -1, O_CREAT: -1, O_TRUNC: -1, O_APPEND: -1, O_EXCL: -1, O_DIRECTORY: -1 },
+          writeSync(fd, b) {
+            buf += dec.decode(b);
+            const nl = buf.lastIndexOf("\n");
+            if (nl !== -1) { console.log(buf.substring(0, nl)); buf = buf.substring(nl + 1); }
+            return b.length;
+          },
+          write(fd, b, off, len, pos, cb) { const n = this.writeSync(fd, b.subarray(off, off + len)); cb(null, n); },
+        };
+      }
+    })();
+  </script>
+  <script src="wasm_exec.js"></script>
+  <script>
+    (async () => {
+      try {
+        const go = new Go();
+        const res = await WebAssembly.instantiateStreaming(fetch("app.wasm"), go.importObject);
+        go.run(res.instance);
+      } catch (e) {
+        document.getElementById("err").textContent = "failed to boot the wasm: " + (e && e.message ? e.message : e);
+      }
+    })();
+  </script>
+</body>
+</html>

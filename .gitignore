@@ -1,0 +1,3 @@
+dist/
+/registry-viewer
+*.wasm
