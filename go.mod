@@ -3,8 +3,10 @@ module github.com/go-pkgx/registry-viewer
 go 1.26.4
 
 require (
+	github.com/go-widgets/mvvm v0.3.0
+	github.com/go-widgets/mvvmtk v0.1.0
 	github.com/go-widgets/painter v0.2.0
-	github.com/go-widgets/toolkit v0.95.0
+	github.com/go-widgets/toolkit v0.98.0
 )
 
 require (

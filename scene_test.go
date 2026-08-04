@@ -112,18 +112,74 @@ func TestNewStateFallsBackOnEmptyArray(t *testing.T) {
 	}
 }
 
+// --- title + magnifier chrome --------------------------------------------
+
+// TestTitleAndMagnifierChrome asserts the scene's new chrome: a title Label
+// reading "Registry Viewer", and a real magnifier Icon on the SearchEntry that
+// replaces the toolkit's "?" stand-in. It renders and checks the magnifier ring
+// paints ink at its exact leftmost + rightmost points in the icon slot, and that
+// the slot carries a drawn shape (many inked pixels), proving a real glyph — not
+// the single "?" — rendered.
+func TestTitleAndMagnifierChrome(t *testing.T) {
+	s := newState(surfaceW, surfaceH, nil)
+	if s.title == nil || s.title.Text != "Registry Viewer" {
+		t.Fatalf("title label = %v, want text \"Registry Viewer\"", s.title)
+	}
+	if s.search.Icon == nil {
+		t.Fatal("search Icon is nil — the \"?\" stand-in was not replaced")
+	}
+
+	surf := newSurface()
+	s.draw(surf)
+
+	sb := s.search.Bounds()
+	const radius = 4
+	cx := sb.X + toolkit.SearchEntryPadX + radius + 1
+	cy := sb.Y + sb.H/2 - 1
+	ink := s.theme.OnSurface
+	// Ring left + right points (exact plotted positions of drawMagnifier).
+	if got := px(surf, cx-radius, cy); !eqColor(got, ink) {
+		t.Fatalf("magnifier ring left point (%d,%d) = %+v, want OnSurface %+v", cx-radius, cy, got, ink)
+	}
+	if got := px(surf, cx+radius, cy); !eqColor(got, ink) {
+		t.Fatalf("magnifier ring right point (%d,%d) = %+v, want OnSurface %+v", cx+radius, cy, got, ink)
+	}
+	// The icon slot carries a drawn shape: ring (>=8 octant points) + handle.
+	x0 := sb.X + toolkit.SearchEntryPadX
+	x1 := x0 + toolkit.SearchEntryIconW
+	inked := 0
+	for y := sb.Y; y < sb.Y+sb.H; y++ {
+		for x := x0; x < x1; x++ {
+			if eqColor(px(surf, x, y), ink) {
+				inked++
+			}
+		}
+	}
+	if inked < 12 {
+		t.Fatalf("icon slot shows only %d inked pixels; magnifier not drawn", inked)
+	}
+}
+
 // --- layout: exact rectangles --------------------------------------------
 
 func TestLayoutRectsArePrecise(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 
-	wantSearch := toolkit.Rect{X: margin, Y: margin, W: surfaceW - 2*margin, H: searchH}
+	// Title heads the scene at the top margin.
+	wantTitle := toolkit.Rect{X: margin, Y: margin, W: surfaceW - 2*margin, H: titleH}
+	if got := s.title.Bounds(); got != wantTitle {
+		t.Fatalf("title rect = %+v, want %+v", got, wantTitle)
+	}
+
+	// Search box sits below the title: Y = margin + titleH + gap.
+	wantSearchY := margin + titleH + gap // 8 + 20 + 6 = 34
+	wantSearch := toolkit.Rect{X: margin, Y: wantSearchY, W: surfaceW - 2*margin, H: searchH}
 	if got := s.search.Bounds(); got != wantSearch {
 		t.Fatalf("search rect = %+v, want %+v", got, wantSearch)
 	}
 
-	// Filter strip sits below the search box: Y = margin + searchH + gap.
-	wantStripY := margin + searchH + gap // 8 + 26 + 6 = 40
+	// Filter strip sits below the search box.
+	wantStripY := margin + titleH + gap + searchH + gap // 34 + 26 + 6 = 66
 	if got := s.filterRow.Bounds(); got.Y != wantStripY || got.H != filterH || got.X != margin {
 		t.Fatalf("filter strip rect = %+v, want Y=%d H=%d X=%d", got, wantStripY, filterH, margin)
 	}
@@ -136,9 +192,9 @@ func TestLayoutRectsArePrecise(t *testing.T) {
 		t.Fatalf("combo Y mismatch: %d %d %d, want %d", os.Y, ar.Y, ve.Y, wantStripY)
 	}
 
-	// Grid: Y = margin + searchH + gap + filterH + gap; fills to the status bar.
-	wantGridY := margin + searchH + gap + filterH + gap // 8+26+6+28+6 = 74
-	wantGridH := (surfaceH - 2*margin) - (searchH + filterH + toolkit.StatusbarH) - 3*gap
+	// Grid: below the filter strip; fills to the status bar.
+	wantGridY := margin + titleH + gap + searchH + gap + filterH + gap // 8+20+6+26+6+28+6 = 100
+	wantGridH := (surfaceH - 2*margin) - (titleH + searchH + filterH + toolkit.StatusbarH) - 4*gap
 	wantGrid := toolkit.Rect{X: margin, Y: wantGridY, W: surfaceW - 2*margin, H: wantGridH}
 	if got := s.grid.Bounds(); got != wantGrid {
 		t.Fatalf("grid rect = %+v, want %+v", got, wantGrid)
@@ -280,7 +336,7 @@ func TestSelectedRowPaintsAccentAtExpectedY(t *testing.T) {
 	if cellAt(hugo, 0) != "hugo" {
 		t.Fatalf("first package row = %q, want hugo", cellAt(hugo, 0))
 	}
-	s.grid.Selected = hugo
+	s.selection.Set(hugo) // via the MVVM sink, not a direct widget write
 
 	surf := newSurface()
 	s.draw(surf)
@@ -345,16 +401,16 @@ func TestOSFilterNarrowsGrid(t *testing.T) {
 	// osDomain = [darwin linux windows]; "windows" is domain index 2 ->
 	// DropDown option 3.
 	s.osDrop.Select(3)
-	if s.osFilter != "windows" {
-		t.Fatalf("osFilter = %q, want windows", s.osFilter)
+	if s.osFilter() != "windows" {
+		t.Fatalf("osFilter = %q, want windows", s.osFilter())
 	}
 	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"ripgrep", "zstd"}) {
 		t.Fatalf("os=windows -> %v, want [ripgrep zstd]", got)
 	}
 	// Back to All.
 	s.osDrop.Select(0)
-	if s.osFilter != "" {
-		t.Fatalf("osFilter after All = %q, want empty", s.osFilter)
+	if s.osFilter() != "" {
+		t.Fatalf("osFilter after All = %q, want empty", s.osFilter())
 	}
 	if got := len(s.shownNames()); got != 5 {
 		t.Fatalf("os=All count = %d, want 5", got)
@@ -373,8 +429,8 @@ func TestVersionFilterNarrowsGrid(t *testing.T) {
 		t.Fatal("version 1.10.0 not in domain")
 	}
 	s.verDrop.Select(idx)
-	if s.verFilter != "1.10.0" {
-		t.Fatalf("verFilter = %q, want 1.10.0", s.verFilter)
+	if s.verFilter() != "1.10.0" {
+		t.Fatalf("verFilter = %q, want 1.10.0", s.verFilter())
 	}
 	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"lz4"}) {
 		t.Fatalf("version=1.10.0 -> %v, want [lz4]", got)
@@ -396,12 +452,12 @@ func TestDropDownPopoverRouting(t *testing.T) {
 
 	pb := s.verDrop.PopoverBounds()
 	// Option row 1 is the first real version (row 0 is "All").
-	s.handleClick(pb.X+5, pb.Y+dropDownRowH+dropDownRowH/2)
+	s.handleClick(pb.X+5, pb.Y+toolkit.PopoverRowH+toolkit.PopoverRowH/2)
 	if s.verDrop.Open {
 		t.Fatal("selecting a popover option should close it")
 	}
-	if s.verFilter != s.verDomain[0] {
-		t.Fatalf("verFilter = %q, want %q", s.verFilter, s.verDomain[0])
+	if s.verFilter() != s.verDomain[0] {
+		t.Fatalf("verFilter = %q, want %q", s.verFilter(), s.verDomain[0])
 	}
 	// Reopen, then dismiss with an outside click.
 	s.handleClick(dr.X+dr.W/2, dr.Y+dr.H/2)
@@ -419,8 +475,8 @@ func TestCombinedFiltersAND(t *testing.T) {
 	s.search.OnChange("lz4")
 	// archDomain = [amd64 arm64]; "arm64" -> domain index 1 -> option 2.
 	s.archDrop.Select(2)
-	if s.archFilter != "arm64" {
-		t.Fatalf("archFilter = %q, want arm64", s.archFilter)
+	if s.archFilter() != "arm64" {
+		t.Fatalf("archFilter = %q, want arm64", s.archFilter())
 	}
 	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"lz4"}) {
 		t.Fatalf("lz4 + arm64 -> %v, want [lz4]", got)
@@ -445,6 +501,72 @@ func TestStatusCountUpdates(t *testing.T) {
 	}
 }
 
+// TestFilterObservablesDriveVisibleSet proves the MVVM wiring end-to-end:
+// setting a filter Observable DIRECTLY (no widget event) recomputes the grid's
+// visible set and the status counts, and the two-way binding mirrors the value
+// back into the widget. This is the core "state lives in the view-model, widgets
+// are bound to it" guarantee.
+func TestFilterObservablesDriveVisibleSet(t *testing.T) {
+	s := newState(surfaceW, surfaceH, nil)
+	if got := len(s.shownNames()); got != 5 {
+		t.Fatalf("unfiltered = %d, want 5", got)
+	}
+
+	// Name Observable -> visible set + widget text.
+	s.name.Set("lz")
+	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"lz4"}) {
+		t.Fatalf("name Observable 'lz' -> %v, want [lz4]", got)
+	}
+	if s.search.Text != "lz" {
+		t.Fatalf("search.Text = %q, want lz (Observable -> widget)", s.search.Text)
+	}
+	s.name.Set("")
+
+	// osIdx Observable: "windows" is domain index 2 -> option 3.
+	s.osIdx.Set(3)
+	if s.osFilter() != "windows" {
+		t.Fatalf("osFilter() = %q, want windows", s.osFilter())
+	}
+	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"ripgrep", "zstd"}) {
+		t.Fatalf("osIdx=3 (windows) -> %v, want [ripgrep zstd]", got)
+	}
+	if s.osDrop.Selected != 3 {
+		t.Fatalf("osDrop.Selected = %d, want 3 (Observable -> widget)", s.osDrop.Selected)
+	}
+	// Status counts derive from the same model.
+	if s.status.Segments[0] != "5 packages" || s.status.Segments[1] != "2 shown" {
+		t.Fatalf("status = %v, want [5 packages][2 shown]", s.status.Segments[:2])
+	}
+
+	s.osIdx.Set(0)
+	if got := len(s.shownNames()); got != 5 {
+		t.Fatalf("cleared -> %d, want 5", got)
+	}
+}
+
+// TestRebuildResetsSelectionAndScroll asserts a filter change resets the grid's
+// transient view (Selected, ScrollRow) through the MVVM sinks — the "never-equal"
+// Observables force the reset even when the grid mutated those fields internally.
+func TestRebuildResetsSelectionAndScroll(t *testing.T) {
+	s := newState(surfaceW, surfaceH, nil)
+	// Simulate the grid having scrolled + a row selected (as user interaction
+	// would leave it — both are the grid's own internal writes), then change a
+	// filter.
+	x, y := gridPoint(s)
+	s.handleScroll(x, y, 4)
+	s.handleClick(x, y) // grid selects the clicked row internally
+	if s.grid.ScrollRow == 0 || s.grid.Selected == nil {
+		t.Fatal("precondition: grid should have scrolled and selected a row")
+	}
+	s.name.Set("lz") // any filter change triggers rebuild
+	if s.grid.ScrollRow != 0 {
+		t.Fatalf("rebuild left ScrollRow = %d, want 0", s.grid.ScrollRow)
+	}
+	if s.grid.Selected != nil {
+		t.Fatalf("rebuild left Selected = %v, want nil", s.grid.Selected)
+	}
+}
+
 // --- event routing --------------------------------------------------------
 
 func TestClickSearchFocusesAndTypes(t *testing.T) {
@@ -458,8 +580,8 @@ func TestClickSearchFocusesAndTypes(t *testing.T) {
 	if !s.handleChar("l") || !s.handleChar("z") {
 		t.Fatal("handleChar should consume input while the search is focused")
 	}
-	if s.nameFilter != "lz" {
-		t.Fatalf("nameFilter after typing = %q, want lz", s.nameFilter)
+	if s.nameFilter() != "lz" {
+		t.Fatalf("nameFilter after typing = %q, want lz", s.nameFilter())
 	}
 	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"lz4"}) {
 		t.Fatalf("typed filter -> %v, want [lz4]", got)
@@ -468,8 +590,8 @@ func TestClickSearchFocusesAndTypes(t *testing.T) {
 	if !s.handleKeyDown("Backspace") {
 		t.Fatal("handleKeyDown should consume Backspace")
 	}
-	if s.nameFilter != "l" {
-		t.Fatalf("nameFilter after Backspace = %q, want l", s.nameFilter)
+	if s.nameFilter() != "l" {
+		t.Fatalf("nameFilter after Backspace = %q, want l", s.nameFilter())
 	}
 }
 
@@ -482,14 +604,14 @@ func TestClickClearAffordanceResetsFilter(t *testing.T) {
 	for _, ch := range []string{"l", "z", "4"} {
 		s.handleChar(ch)
 	}
-	if s.search.Text != "lz4" || s.nameFilter != "lz4" {
-		t.Fatalf("precondition: Text=%q nameFilter=%q, want lz4", s.search.Text, s.nameFilter)
+	if s.search.Text != "lz4" || s.nameFilter() != "lz4" {
+		t.Fatalf("precondition: Text=%q nameFilter=%q, want lz4", s.search.Text, s.nameFilter())
 	}
 	// Click the trailing clear slot: local x in [W-pad-iconW, W-pad).
 	clearX := r.X + r.W - toolkit.SearchEntryPadX - toolkit.SearchEntryIconW/2
 	s.handleClick(clearX, r.Y+r.H/2)
-	if s.search.Text != "" || s.nameFilter != "" {
-		t.Fatalf("clear slot click should reset filter; Text=%q nameFilter=%q", s.search.Text, s.nameFilter)
+	if s.search.Text != "" || s.nameFilter() != "" {
+		t.Fatalf("clear slot click should reset filter; Text=%q nameFilter=%q", s.search.Text, s.nameFilter())
 	}
 	if got := len(s.shownNames()); got != 5 {
 		t.Fatalf("count after clear = %d, want 5", got)
@@ -773,7 +895,7 @@ func TestInsideAndLocalHelpers(t *testing.T) {
 func TestRenderDumpsPNG(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	// Select the first row so the render also shows the Accent selection band.
-	s.grid.Selected = s.grid.Root[0]
+	s.selection.Set(s.grid.Root[0]) // via the MVVM sink, not a direct widget write
 	surf := newSurface()
 	s.draw(surf)
 

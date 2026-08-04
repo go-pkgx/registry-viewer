@@ -1,10 +1,19 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
-// Scene state for the go-pkgx registry viewer. Composes a SearchEntry
-// (name filter), three DropDown combos (os / arch / version filters), a
-// TreeTable columned tree grid (Package: name -> os/arch -> version;
-// Published: the version's date) and a Statusbar count into a single
+// Scene state for the go-pkgx registry viewer. Composes a title Label, a
+// SearchEntry (name filter), three DropDown combos (os / arch / version
+// filters), a TreeTable columned tree grid (Package: name -> os/arch ->
+// version; Published: the version's date) and a Statusbar count into a single
 // filterable dashboard, all from go-widgets/toolkit.
+//
+// All app state lives in a go-widgets/mvvm view-model: the filters are
+// Observables, the visible forest is an ObservableList and the status counts
+// are Observables. Widgets are wired to them with go-widgets/mvvmtk binding
+// helpers (BindText / BindSelectedIndex / BindTree) plus the generic mvvm.OneWay
+// adapter (see bindings.go). The scene NEVER assigns a widget value field
+// directly: a user edit flows widget-callback -> Observable, and an Observable
+// change flows Observable -> widget field, so this file holds no ad-hoc widget
+// state.
 //
 // Kept in a separate file with NO js/wasm build tag (main.go carries
 // it) so a native `go test` can exercise the whole scene — parse,
@@ -20,6 +29,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-widgets/mvvm"
+	"github.com/go-widgets/mvvmtk"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
@@ -42,22 +53,18 @@ const (
 )
 
 // Layout constants. A single outer margin, a uniform inter-row gap,
-// and the fixed heights of the search box, the filter (combo) strip and
+// and the fixed heights of the title, search box, the filter (combo) strip and
 // the bottom status bar. The TreeTable grid flexes to fill the rest.
 const (
 	margin  = 8
 	gap     = 6
+	titleH  = 20
 	searchH = 26
 	filterH = 28
 
 	// gridPubColW is the fixed pixel width of the Published (date) column;
 	// the Package tree column takes the remaining (auto) width.
 	gridPubColW = 132
-
-	// dropDownRowH is the pixel height of one row in a filter DropDown's
-	// popover (matches the toolkit's PopoverBounds row step), used to map a
-	// click inside the popover back to an option index.
-	dropDownRowH = 18
 )
 
 // pkg is one published package/platform/version row from registry.json.
@@ -73,8 +80,9 @@ type pkg struct {
 	Published string `json:"published"`
 }
 
-// state is the whole scene: the parsed registry, the filter widgets,
-// the TreeTable grid, the Statusbar and the box layout that positions them.
+// state is the whole scene: the parsed registry, the MVVM view-model
+// (filter + derived Observables), the widgets bound to it and the box layout
+// that positions them.
 type state struct {
 	w, h  int
 	theme *toolkit.Theme
@@ -87,18 +95,33 @@ type state struct {
 	archDomain []string
 	verDomain  []string
 
-	// Active filter state. nameFilter is stored lower-cased for a
-	// case-insensitive substring match; an empty os/arch/verFilter
-	// means "All" (option 0).
-	nameFilter string
-	osFilter   string
-	archFilter string
-	verFilter  string
+	// --- view-model: filter Observables (the editable UI state) ----------
+	// name is the raw SearchEntry text; os/arch/ver are DropDown option
+	// indices (0 == "All", i>0 == domain[i-1]). Two-way-bound to the widgets,
+	// so a user edit updates the Observable and vice-versa. passes() reads
+	// them; any change triggers rebuild().
+	name    *mvvm.Observable[string]
+	osIdx   *mvvm.Observable[int]
+	archIdx *mvvm.Observable[int]
+	verIdx  *mvvm.Observable[int]
 
-	// Widgets. A SearchEntry filters by name; three DropDown combos filter
-	// os / arch / version. The registry itself is a TreeTable (columned tree
-	// grid): a Package tree column carrying name -> os/arch -> version, and a
-	// Published date column on the version-leaf rows.
+	// --- view-model: derived Observables (rebuild() output) --------------
+	// forest is the filtered TreeTable forest (bound to grid.Root via
+	// mvvmtk.BindTree). selection / scroll reset the grid's transient view on
+	// every rebuild; totalText / shownText drive the Statusbar segments;
+	// focused drives the SearchEntry caret. See bindings.go for the sinks.
+	forest    *mvvm.ObservableList[*toolkit.TreeTableNode]
+	selection *mvvm.Observable[*toolkit.TreeTableNode]
+	scroll    *mvvm.Observable[int]
+	totalText *mvvm.Observable[string]
+	shownText *mvvm.Observable[string]
+	focused   *mvvm.Observable[bool]
+
+	// Widgets. A title Label heads the scene; a SearchEntry filters by name;
+	// three DropDown combos filter os / arch / version. The registry itself is
+	// a TreeTable (columned tree grid): a Package tree column carrying name ->
+	// os/arch -> version, and a Published date column on the version-leaf rows.
+	title    *toolkit.Label
 	search   *toolkit.SearchEntry
 	osDrop   *toolkit.DropDown
 	archDrop *toolkit.DropDown
@@ -106,9 +129,9 @@ type state struct {
 	grid     *toolkit.TreeTable
 	status   *toolkit.Statusbar
 
-	// Box layout. root stacks the search box, the filter (combo) strip, the
-	// grid and the status bar vertically; filterRow packs the three combos
-	// left-to-right.
+	// Box layout. root stacks the title, the search box, the filter (combo)
+	// strip, the grid and the status bar vertically; filterRow packs the three
+	// combos left-to-right.
 	root      *toolkit.VBox
 	filterRow *toolkit.HBox
 
@@ -145,10 +168,10 @@ func distinct(rows []pkg, sel func(pkg) string) []string {
 }
 
 // newState parses data (falling back to the embedded sample on nil /
-// parse error), builds every widget, lays them out and computes the
-// first filtered tree. The second parameter is currently ignored (the
-// surface height is fixed); it is accepted so the signature reads like
-// the gallery template's newState(w, h).
+// parse error), builds the view-model + widgets, binds them, lays them out and
+// computes the first filtered tree. The second parameter is currently ignored
+// (the surface height is fixed); it is accepted so the signature reads like the
+// gallery template's newState(w, h).
 func newState(w, _ int, data []byte) *state {
 	// Anti-aliased, shaped go-opentype text (matching the gallery), so
 	// the tree + labels render crisply. Done first, before any layout
@@ -171,19 +194,35 @@ func newState(w, _ int, data []byte) *state {
 	s.archDomain = distinct(rows, func(p pkg) string { return p.Arch })
 	s.verDomain = distinct(rows, func(p pkg) string { return p.Version })
 
+	// --- view-model ------------------------------------------------------
+	// Filters use == observables so two-way binding is loop-free. selection +
+	// scroll are "never-equal" (nil eq) so a rebuild's redundant Set(nil)/Set(0)
+	// still forces the grid's transient view to reset even when the grid mutated
+	// Selected/ScrollRow internally (a click or wheel scroll) meanwhile.
+	s.name = mvvm.NewObservable("")
+	s.osIdx = mvvm.NewObservable(0)
+	s.archIdx = mvvm.NewObservable(0)
+	s.verIdx = mvvm.NewObservable(0)
+	s.forest = mvvm.NewObservableList[*toolkit.TreeTableNode]()
+	s.selection = mvvm.NewObservableEq[*toolkit.TreeTableNode](nil, nil)
+	s.scroll = mvvm.NewObservableEq[int](0, nil)
+	s.totalText = mvvm.NewObservable("")
+	s.shownText = mvvm.NewObservable("")
+	s.focused = mvvm.NewObservable(false)
+
 	// --- widgets ---------------------------------------------------------
+	s.title = toolkit.NewLabel("Registry Viewer")
+	s.title.Align = toolkit.AlignCenter
+	s.title.VAlign = toolkit.VMiddle
+
 	s.search = toolkit.NewSearchEntry("")
-	s.search.OnChange = func(text string) {
-		s.nameFilter = strings.ToLower(strings.TrimSpace(text))
-		s.rebuild()
-	}
+	// A real magnifier in the left prefix slot replaces the toolkit's "?"
+	// bitmap-font stand-in (drawn with painter primitives; see drawMagnifier).
+	s.search.Icon = drawMagnifier
 
 	s.osDrop = toolkit.NewDropDown(append([]string{"All"}, s.osDomain...), 0)
-	s.osDrop.OnSelect = func(i int) { s.osFilter = domainValue(s.osDomain, i); s.rebuild() }
 	s.archDrop = toolkit.NewDropDown(append([]string{"All"}, s.archDomain...), 0)
-	s.archDrop.OnSelect = func(i int) { s.archFilter = domainValue(s.archDomain, i); s.rebuild() }
 	s.verDrop = toolkit.NewDropDown(append([]string{"All"}, s.verDomain...), 0)
-	s.verDrop.OnSelect = func(i int) { s.verFilter = domainValue(s.verDomain, i); s.rebuild() }
 
 	// TreeTable (columned tree grid): Package (tree column, auto width) +
 	// Published (fixed date column, right-aligned so dates line up).
@@ -194,9 +233,29 @@ func newState(w, _ int, data []byte) *state {
 
 	s.status = toolkit.NewStatusbar([]string{"", "", "go-pkgx / registry-viewer"})
 
+	// --- bindings --------------------------------------------------------
+	// Two-way: widget value field <-> filter Observable (a user edit flows
+	// callback -> Observable; an Observable change flows -> widget field). No
+	// invalidate hook is needed — main.go re-renders after each handled event,
+	// synchronously after the binding has propagated.
+	mvvmtk.BindText(s.search, s.name, nil)
+	mvvmtk.BindSelectedIndex(s.osDrop, s.osIdx, nil)
+	mvvmtk.BindSelectedIndex(s.archDrop, s.archIdx, nil)
+	mvvmtk.BindSelectedIndex(s.verDrop, s.verIdx, nil)
+	// Derived forest -> grid.Root (each element is already a *TreeTableNode, so
+	// the projection is the identity).
+	mvvmtk.BindTree(s.grid, s.forest, func(n *toolkit.TreeTableNode) *toolkit.TreeTableNode { return n }, nil)
+	// One-way sinks that address raw widget value fields live in bindings.go.
+	bindWidgets(s)
+
+	// Any filter change rebuilds the derived tree + counts.
+	for _, o := range []mvvm.Changeable{s.name, s.osIdx, s.archIdx, s.verIdx} {
+		o.SubscribeChanged(s.rebuild)
+	}
+
 	// --- box layout ------------------------------------------------------
-	// root: search (fixed) / filter strip (fixed) / grid (flex) / status
-	// (fixed). filterRow: three equal-flex combo boxes.
+	// root: title (fixed) / search (fixed) / filter strip (fixed) / grid (flex)
+	// / status (fixed). filterRow: three equal-flex combo boxes.
 	s.filterRow = toolkit.NewHBox()
 	s.filterRow.Spacing = gap
 	s.filterRow.AddFlex(s.osDrop, 1)
@@ -205,13 +264,15 @@ func newState(w, _ int, data []byte) *state {
 
 	s.root = toolkit.NewVBox()
 	s.root.Spacing = gap
+	s.root.AddFixed(s.title, titleH)
 	s.root.AddFixed(s.search, searchH)
 	s.root.AddFixed(s.filterRow, filterH)
 	s.root.AddFlex(s.grid, 1)
 	s.root.AddFixed(s.status, toolkit.StatusbarH)
 	s.root.SetBounds(toolkit.Rect{X: margin, Y: margin, W: w - 2*margin, H: surfaceH - 2*margin})
 
-	// Hit-test order = visual/z order: filters first, then the grid.
+	// Hit-test order = visual/z order: filters first, then the grid. The title
+	// Label is non-interactive (HitTest false), so it stays out of clickables.
 	s.clickables = []toolkit.Widget{s.search, s.osDrop, s.archDrop, s.verDrop, s.grid}
 
 	s.rebuild()
@@ -233,19 +294,27 @@ func domainValue(domain []string, i int) string {
 	return domain[i-1]
 }
 
+// nameFilter / osFilter / archFilter / verFilter resolve the current filter
+// Observables to their comparison values: the trimmed lower-cased search text,
+// and each combo index mapped through its domain ("" == no constraint).
+func (s *state) nameFilter() string { return strings.ToLower(strings.TrimSpace(s.name.Get())) }
+func (s *state) osFilter() string   { return domainValue(s.osDomain, s.osIdx.Get()) }
+func (s *state) archFilter() string { return domainValue(s.archDomain, s.archIdx.Get()) }
+func (s *state) verFilter() string  { return domainValue(s.verDomain, s.verIdx.Get()) }
+
 // passes reports whether p survives every active filter (combined with
 // AND). An empty os/arch/verFilter or nameFilter is "no constraint".
 func (s *state) passes(p pkg) bool {
-	if s.nameFilter != "" && !strings.Contains(strings.ToLower(p.Name), s.nameFilter) {
+	if nf := s.nameFilter(); nf != "" && !strings.Contains(strings.ToLower(p.Name), nf) {
 		return false
 	}
-	if s.osFilter != "" && p.OS != s.osFilter {
+	if of := s.osFilter(); of != "" && p.OS != of {
 		return false
 	}
-	if s.archFilter != "" && p.Arch != s.archFilter {
+	if af := s.archFilter(); af != "" && p.Arch != af {
 		return false
 	}
-	if s.verFilter != "" && p.Version != s.verFilter {
+	if vf := s.verFilter(); vf != "" && p.Version != vf {
 		return false
 	}
 	return true
@@ -253,8 +322,11 @@ func (s *state) passes(p pkg) bool {
 
 // rebuild recomputes the filtered TreeTable forest (name -> os/arch ->
 // version, with the publish date in the version leaf's Published cell) and
-// refreshes the Statusbar count. Called on construction and on every filter
-// change. Deterministic: names, os/arch groups and versions are each sorted.
+// refreshes the derived Observables (forest, selection/scroll reset, status
+// counts). Subscribed to every filter Observable, so it runs on construction
+// and on every filter change. It writes NO widget field directly — the bindings
+// push these Observables into the widgets. Deterministic: names, os/arch groups
+// and versions are each sorted.
 func (s *state) rebuild() {
 	// name -> "os/arch" -> version -> published date. The registry has one
 	// row per (name, os, arch, version), so a plain assignment (last wins)
@@ -304,14 +376,20 @@ func (s *state) rebuild() {
 		}
 		forest = append(forest, nameNode)
 	}
-	s.grid.Root = forest
-	s.grid.Selected = nil
-	s.grid.ScrollRow = 0
+
+	// Push the derived state through the Observables. Clear then Append replaces
+	// the forest list wholesale (BindTree rebuilds grid.Root on each event);
+	// selection/scroll reset the grid's transient view; the status Observables
+	// drive the Statusbar segment text.
+	s.forest.Clear()
+	s.forest.Append(forest...)
+	s.selection.Set(nil)
+	s.scroll.Set(0)
 
 	total := len(distinct(s.pkgs, func(p pkg) string { return p.Name }))
 	shown := len(names)
-	s.status.SetSegment(0, strconv.Itoa(total)+" packages")
-	s.status.SetSegment(1, strconv.Itoa(shown)+" shown")
+	s.totalText.Set(strconv.Itoa(total) + " packages")
+	s.shownText.Set(strconv.Itoa(shown) + " shown")
 }
 
 // shownNames returns the top-level package-name rows currently in the
@@ -375,20 +453,55 @@ func (s *state) rowY(i int) int {
 // draw paints the whole scene onto buf (an RGBA row-major slice). Buf +
 // s.w/s.h are wrapped in a PixelPainter so the widget code sees only the
 // painter.Painter interface. Background first, then the box layout
-// (search / filter combos / grid / status), then any open combo popover.
+// (title / search / filter combos / grid / status), then any open combo
+// popover (which the DropDown itself draws, floating above the grid).
 func (s *state) draw(buf []byte) {
 	fillBG(buf, s.w, s.h, s.theme.Background)
 	p := painter.NewPixelPainter(buf, s.w, s.h)
 	s.root.Draw(p, s.theme)
-	// A filter DropDown's popover floats above the grid (the host owns the
-	// popover surface): a ListBox of the options at PopoverBounds.
+	// A filter DropDown's popover floats above the grid; the DropDown paints it
+	// (a no-op when closed) in this overlay pass so it sits on top.
 	for _, d := range s.dropdowns() {
-		if d.Open {
-			lb := toolkit.NewListBox(d.Options)
-			lb.Selected = d.Selected
-			lb.SetBounds(d.PopoverBounds())
-			lb.Draw(p, s.theme)
+		d.DrawPopover(p, s.theme)
+	}
+}
+
+// drawMagnifier paints a small magnifier — a ring plus a short diagonal
+// handle — in the SearchEntry's leading icon slot, replacing the toolkit's
+// "?" bitmap-font stand-in. r is the icon slot rect and ink is the theme's
+// OnSurface colour; it uses only painter PutPixel primitives so it renders
+// identically on every backend.
+func drawMagnifier(p painter.Painter, r toolkit.Rect, ink toolkit.RGBA) {
+	// Ring: a circle in the upper-left of the slot, sized to leave room for the
+	// handle running out toward the lower-right corner.
+	const radius = 4
+	cx := r.X + radius + 1
+	cy := r.Y + r.H/2 - 1
+	// Midpoint circle: one step of x/y plots all eight octants of the ring.
+	x, y, errv := radius, 0, 1-radius
+	for x >= y {
+		p.PutPixel(cx+x, cy+y, ink)
+		p.PutPixel(cx+y, cy+x, ink)
+		p.PutPixel(cx-y, cy+x, ink)
+		p.PutPixel(cx-x, cy+y, ink)
+		p.PutPixel(cx-x, cy-y, ink)
+		p.PutPixel(cx-y, cy-x, ink)
+		p.PutPixel(cx+y, cy-x, ink)
+		p.PutPixel(cx+x, cy-y, ink)
+		y++
+		if errv < 0 {
+			errv += 2*y + 1
+		} else {
+			x--
+			errv += 2*(y-x) + 1
 		}
+	}
+	// Handle: a short 45° diagonal from the ring's lower-right, two pixels thick
+	// so it reads at any zoom, running toward the slot's lower-right corner.
+	hx, hy := cx+radius-1, cy+radius-1
+	for i := 0; i < 5; i++ {
+		p.PutPixel(hx+i, hy+i, ink)
+		p.PutPixel(hx+i+1, hy+i, ink)
 	}
 }
 
@@ -399,16 +512,12 @@ func (s *state) draw(buf []byte) {
 func (s *state) handleClick(x, y int) bool {
 	ev := toolkit.Event{Kind: toolkit.EventClick, X: x, Y: y}
 
-	// An open combo popover floats above everything: a click inside selects
-	// that option row; a click outside dismisses it.
+	// An open combo popover floats above everything: the DropDown routes the
+	// click itself — inside selects that option (firing OnSelect -> Observable),
+	// outside dismisses it. A closed DropDown returns false, so we fall through
+	// to normal hit-testing (where a click on the control reopens it).
 	for _, d := range s.dropdowns() {
-		if d.Open {
-			pb := d.PopoverBounds()
-			if inside(x, y, pb) {
-				d.Select((y - pb.Y) / dropDownRowH)
-			} else {
-				d.Open = false
-			}
+		if d.PopoverClick(x, y) {
 			return true
 		}
 	}
@@ -417,13 +526,13 @@ func (s *state) handleClick(x, y int) bool {
 		r := w.Bounds()
 		if inside(x, y, r) {
 			s.keyTarget = w
-			s.search.Focused = (w == toolkit.Widget(s.search))
+			s.focused.Set(w == toolkit.Widget(s.search))
 			w.OnEvent(local(ev, r))
 			return true
 		}
 	}
 	s.keyTarget = nil
-	s.search.Focused = false
+	s.focused.Set(false)
 	return true
 }
 
