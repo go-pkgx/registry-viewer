@@ -85,6 +85,28 @@ func main() {
 	listen("mousemove", func(x, y int) bool { return state.handleMove(x, y) })
 	listen("mouseup", func(x, y int) bool { return state.handleRelease(x, y) })
 
+	// Wheel: forward the raw browser scroll to the widget under the pointer
+	// as a toolkit EventScroll. Delta is expressed in ROWS (not pixels): the
+	// sign of deltaY picks a small fixed row step, and the toolkit's
+	// scrollable widget (the TreeTable grid) does all the offset math +
+	// clamping itself. preventDefault stops the page from scrolling under us.
+	canvas.Call("addEventListener", "wheel", js.FuncOf(func(_ js.Value, args []js.Value) any {
+		if state == nil || len(args) == 0 {
+			return nil
+		}
+		ev := args[0]
+		ev.Call("preventDefault")
+		x, y := coords(ev)
+		d := 3
+		if ev.Get("deltaY").Float() < 0 {
+			d = -3
+		}
+		if state.handleScroll(x, y, d) {
+			render()
+		}
+		return nil
+	}), map[string]any{"passive": false})
+
 	// Keyboard: a single printable rune with no Ctrl/Meta/Alt is text
 	// (EventChar) routed to the focused SearchEntry; every named key
 	// (Backspace, …) is an EventKeyDown. Listen on the window (a <canvas>

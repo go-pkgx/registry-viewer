@@ -427,6 +427,18 @@ func (s *state) handleClick(x, y int) bool {
 	return true
 }
 
+// handleScroll routes a wheel scroll at surface (x, y) — Delta in ROWS,
+// positive = down — to whichever widget it falls in, via the root VBox's
+// coordinate routing (exactly like a click). The scrollable widget (the
+// TreeTable grid) consumes the EventScroll and scrolls itself, clamping at
+// both ends: the app does NO scroll math. Always reports true so the driver
+// re-renders (a scroll over dead space is a harmless no-op paint).
+func (s *state) handleScroll(x, y, delta int) bool {
+	ev := toolkit.Event{Kind: toolkit.EventScroll, X: x, Y: y, Delta: delta}
+	s.root.OnEvent(local(ev, s.root.Bounds()))
+	return true
+}
+
 // handleMove is a no-op hover hook (the scene has no hover affordances);
 // kept so main.go can wire mousemove uniformly with the gallery driver.
 func (s *state) handleMove(x, y int) bool { _, _ = x, y; return false }

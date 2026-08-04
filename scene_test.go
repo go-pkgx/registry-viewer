@@ -555,6 +555,141 @@ func TestHandleMoveAndReleaseAreNoOps(t *testing.T) {
 	}
 }
 
+// gridWindow returns the number of BODY rows the grid can show at once,
+// computed the same way the toolkit's TreeTable.bodyVisibleRows does
+// (bounds height minus the header, divided by the row height).
+func gridWindow(s *state) int {
+	return (s.grid.Bounds().H - toolkit.TreeTableHeaderHeight) / toolkit.TreeTableRowHeight
+}
+
+// gridPoint returns a surface point that lands inside the grid's body, so a
+// forwarded EventScroll routes (through the root VBox) to the grid.
+func gridPoint(s *state) (int, int) {
+	r := s.grid.Bounds()
+	return r.X + 20, r.Y + toolkit.TreeTableHeaderHeight + toolkit.TreeTableRowHeight/2
+}
+
+// TestWheelScrollShiftsGridWindow forwards EventScroll through handleScroll
+// and asserts the grid's visible window shifts: the first drawn body row's
+// model index (grid.ScrollRow) increases on a down-scroll, and both ends
+// CLAMP (up past the top pins at 0, down past the end pins at total-window).
+// The app owns no scroll math — the TreeTable clamps itself.
+func TestWheelScrollShiftsGridWindow(t *testing.T) {
+	s := newState(surfaceW, surfaceH, nil)
+
+	// Scrolling is only meaningful when there are more rows than fit.
+	total := len(s.visibleRows())
+	window := gridWindow(s)
+	if total <= window {
+		t.Fatalf("need more rows than fit for a scroll test: total=%d window=%d", total, window)
+	}
+	maxScroll := total - window
+
+	if s.grid.ScrollRow != 0 {
+		t.Fatalf("fresh grid ScrollRow = %d, want 0", s.grid.ScrollRow)
+	}
+
+	x, y := gridPoint(s)
+
+	// Down-scroll: the first drawn body row's model index must increase.
+	before := s.grid.ScrollRow
+	if !s.handleScroll(x, y, 3) {
+		t.Fatal("handleScroll should report a change (re-render)")
+	}
+	after := s.grid.ScrollRow
+	if after <= before {
+		t.Fatalf("down-scroll: first body row index %d did not increase past %d", after, before)
+	}
+	if after != 3 {
+		t.Fatalf("down-scroll by 3 rows: ScrollRow = %d, want 3", after)
+	}
+
+	// Down past the end clamps at total-window (last full window), not beyond.
+	s.handleScroll(x, y, 10*total)
+	if s.grid.ScrollRow != maxScroll {
+		t.Fatalf("over-scroll down: ScrollRow = %d, want clamp at %d", s.grid.ScrollRow, maxScroll)
+	}
+
+	// Up past the top clamps at 0 (no negative offset).
+	s.handleScroll(x, y, -10*total)
+	if s.grid.ScrollRow != 0 {
+		t.Fatalf("over-scroll up: ScrollRow = %d, want clamp at 0", s.grid.ScrollRow)
+	}
+
+	// A scroll whose point falls on a non-scrollable widget (the search box)
+	// routes there and leaves the grid untouched — still reports a re-render.
+	sr := s.search.Bounds()
+	if !s.handleScroll(sr.X+5, sr.Y+sr.H/2, 3) {
+		t.Fatal("handleScroll always reports true")
+	}
+	if s.grid.ScrollRow != 0 {
+		t.Fatalf("scroll over the search box moved the grid: ScrollRow = %d, want 0", s.grid.ScrollRow)
+	}
+}
+
+// TestScrolledRenderDiffersAndDumpsPNG renders the grid at ScrollRow 0 and
+// again after a wheel down-scroll, asserts the first body row's pixels
+// actually changed (the grid really repainted a different top row), and
+// writes testdata/render_scrolled.png for visual inspection.
+func TestScrolledRenderDiffersAndDumpsPNG(t *testing.T) {
+	s := newState(surfaceW, surfaceH, nil)
+
+	// Unscrolled top-of-body capture.
+	surf0 := newSurface()
+	s.draw(surf0)
+
+	x, y := gridPoint(s)
+	s.handleScroll(x, y, 6) // scroll down six rows
+	if s.grid.ScrollRow == 0 {
+		t.Fatal("precondition: grid should have scrolled off row 0")
+	}
+
+	surf1 := newSurface()
+	s.draw(surf1)
+
+	// The first body row band must differ between the two renders: a scrolled
+	// grid paints a different model row at the top.
+	r := s.grid.Bounds()
+	y0 := r.Y + toolkit.TreeTableHeaderHeight + 2
+	y1 := y0 + toolkit.TreeTableRowHeight - 4
+	x0, x1 := r.X+2, r.X+r.W-scrollbarW-2
+	differs := false
+	for yy := y0; yy < y1 && !differs; yy++ {
+		for xx := x0; xx < x1; xx++ {
+			if !eqColor(px(surf0, xx, yy), px(surf1, xx, yy)) {
+				differs = true
+				break
+			}
+		}
+	}
+	if !differs {
+		t.Fatal("scrolled render's top body row is pixel-identical to the unscrolled one")
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, surfaceW, surfaceH))
+	for yy := 0; yy < surfaceH; yy++ {
+		for xx := 0; xx < surfaceW; xx++ {
+			i := 4 * (yy*surfaceW + xx)
+			img.Set(xx, yy, color.RGBA{surf1[i], surf1[i+1], surf1[i+2], surf1[i+3]})
+		}
+	}
+	if err := os.MkdirAll("testdata", 0o755); err != nil {
+		t.Fatalf("mkdir testdata: %v", err)
+	}
+	out := filepath.Join("testdata", "render_scrolled.png")
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatalf("create %s: %v", out, err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatalf("encode %s: %v", out, err)
+	}
+	if img.Bounds().Dx() != surfaceW || img.Bounds().Dy() != surfaceH {
+		t.Fatalf("render_scrolled.png dims = %dx%d, want %dx%d", img.Bounds().Dx(), img.Bounds().Dy(), surfaceW, surfaceH)
+	}
+}
+
 // --- helpers + edge branches ---------------------------------------------
 
 func TestDomainValueEdges(t *testing.T) {
