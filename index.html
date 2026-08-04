@@ -37,13 +37,11 @@
   #filters input, #filters select { background: #11151f; color: #e6e8f0; border: 1px solid #262c40; border-radius: 8px; padding: 7px 10px; font: inherit; }
   #filters input { flex: 1 1 200px; }
   #count { color: #9aa0b4; font-size: .85rem; margin: 0 0 10px; }
-  /* Tree-grid table mirroring the canvas TreeTable: a Package tree column
-     (indented rows) + a right-aligned Published date column. */
+  /* Tree-grid table mirroring the canvas TreeTable: a single Package tree
+     column with indented rows. */
   #grid { width: 100%; border-collapse: collapse; }
   #grid th { position: sticky; top: 0; background: #11151f; color: #9aa0b4; font-weight: 600; text-align: left; padding: 7px 10px; border-bottom: 1px solid #262c40; }
-  #grid th.pubcol { text-align: right; width: 132px; }
   #grid td { padding: 2px 10px; border-bottom: 1px solid #171b26; white-space: nowrap; }
-  #grid td.pubcol { text-align: right; color: #7d8598; font-variant-numeric: tabular-nums; }
   #grid tr.lvl0 td.pkg { font-weight: 600; }
   #grid tr.lvl1 td.pkg { color: #9aa0b4; }
   #grid tr.lvl2 td.pkg { color: #cfe9e4; font-family: ui-monospace, Menlo, Consolas, monospace; }
@@ -134,37 +132,35 @@
         const nq = norm(el("f-name").value), os = el("f-os").value, ar = el("f-arch").value, ve = el("f-ver").value;
         const shown = rows.filter(r =>
           (!nq || norm(r.name).includes(nq)) && (!os || r.os === os) && (!ar || r.arch === ar) && (!ve || r.version === ve));
-        // group name -> os/arch -> version
+        // group name -> os/arch -> set of versions
         const byName = new Map();
         for (const r of shown) {
           if (!byName.has(r.name)) byName.set(r.name, new Map());
           const pl = r.os + "/" + r.arch, m = byName.get(r.name);
-          if (!m.has(pl)) m.set(pl, new Map()); // version -> published date
-          m.get(pl).set(r.version, r.published || "");
+          if (!m.has(pl)) m.set(pl, new Set());
+          m.get(pl).add(r.version);
         }
-        // Render a tree-grid table (indented Package column + Published date
-        // column) mirroring the canvas TreeTable. Dates go in their own cell.
+        // Render a single-column tree-grid table (indented Package column)
+        // mirroring the canvas TreeTable.
         const tree = el("tree"); tree.textContent = "";
         const table = document.createElement("table"); table.id = "grid";
         const thead = document.createElement("thead");
         const htr = document.createElement("tr");
         const th0 = document.createElement("th"); th0.textContent = "Package";
-        const th1 = document.createElement("th"); th1.className = "pubcol"; th1.textContent = "Published";
-        htr.appendChild(th0); htr.appendChild(th1); thead.appendChild(htr); table.appendChild(thead);
+        htr.appendChild(th0); thead.appendChild(htr); table.appendChild(thead);
         const tbody = document.createElement("tbody");
-        const addRow = (depth, label, pub) => {
+        const addRow = (depth, label) => {
           const tr = document.createElement("tr"); tr.className = "lvl" + depth;
           const tp = document.createElement("td"); tp.className = "pkg";
           tp.style.paddingLeft = (10 + depth * 18) + "px"; tp.textContent = label;
-          const td = document.createElement("td"); td.className = "pubcol"; td.textContent = pub || "";
-          tr.appendChild(tp); tr.appendChild(td); tbody.appendChild(tr);
+          tr.appendChild(tp); tbody.appendChild(tr);
         };
         for (const name of [...byName.keys()].sort()) {
-          addRow(0, name, "");
+          addRow(0, name);
           for (const pl of [...byName.get(name).keys()].sort()) {
-            addRow(1, pl, "");
-            for (const v of [...byName.get(name).get(pl).keys()].sort()) {
-              addRow(2, v, byName.get(name).get(pl).get(v));
+            addRow(1, pl);
+            for (const v of [...byName.get(name).get(pl)].sort()) {
+              addRow(2, v);
             }
           }
         }

@@ -2,9 +2,9 @@
 //
 // Scene state for the go-pkgx registry viewer. Composes a title Label, a
 // SearchEntry (name filter), three DropDown combos (os / arch / version
-// filters), a TreeTable columned tree grid (Package: name -> os/arch ->
-// version; Published: the version's date) and a Statusbar count into a single
-// filterable dashboard, all from go-widgets/toolkit.
+// filters), a TreeTable single-column tree grid (Package: name -> os/arch ->
+// version) and a Statusbar count into a single filterable dashboard, all from
+// go-widgets/toolkit.
 //
 // All app state lives in a go-widgets/mvvm view-model: the filters are
 // Observables, the visible forest is an ObservableList and the status counts
@@ -61,23 +61,16 @@ const (
 	titleH  = 20
 	searchH = 26
 	filterH = 28
-
-	// gridPubColW is the fixed pixel width of the Published (date) column;
-	// the Package tree column takes the remaining (auto) width.
-	gridPubColW = 132
 )
 
-// pkg is one published package/platform/version row from registry.json.
-// Published is the ISO date (YYYY-MM-DD) the version/platform was
-// published to the registry; it may be empty ("") when unknown (the
-// packages factory fills it from the ghcr version's created_at). It is
-// tolerated missing — a row with no "published" key unmarshals to "".
+// pkg is one published package/platform/version row from registry.json. The
+// anonymous-ghcr catalog carries no publish date, so there is no Published
+// field; unknown JSON keys are tolerated and ignored.
 type pkg struct {
-	Name      string `json:"name"`
-	OS        string `json:"os"`
-	Arch      string `json:"arch"`
-	Version   string `json:"version"`
-	Published string `json:"published"`
+	Name    string `json:"name"`
+	OS      string `json:"os"`
+	Arch    string `json:"arch"`
+	Version string `json:"version"`
 }
 
 // state is the whole scene: the parsed registry, the MVVM view-model
@@ -119,8 +112,8 @@ type state struct {
 
 	// Widgets. A title Label heads the scene; a SearchEntry filters by name;
 	// three DropDown combos filter os / arch / version. The registry itself is
-	// a TreeTable (columned tree grid): a Package tree column carrying name ->
-	// os/arch -> version, and a Published date column on the version-leaf rows.
+	// a TreeTable (single-column tree grid): one Package tree column carrying
+	// name -> os/arch -> version.
 	title    *toolkit.Label
 	search   *toolkit.SearchEntry
 	osDrop   *toolkit.DropDown
@@ -224,11 +217,10 @@ func newState(w, _ int, data []byte) *state {
 	s.archDrop = toolkit.NewDropDown(append([]string{"All"}, s.archDomain...), 0)
 	s.verDrop = toolkit.NewDropDown(append([]string{"All"}, s.verDomain...), 0)
 
-	// TreeTable (columned tree grid): Package (tree column, auto width) +
-	// Published (fixed date column, right-aligned so dates line up).
+	// TreeTable (single-column tree grid): one Package tree column (auto width)
+	// carrying name -> os/arch -> version.
 	s.grid = toolkit.NewTreeTable([]toolkit.TreeTableColumn{
 		{Title: "Package"},
-		{Title: "Published", Width: gridPubColW, Align: toolkit.AlignRight},
 	}, nil)
 
 	s.status = toolkit.NewStatusbar([]string{"", "", "go-pkgx / registry-viewer"})
@@ -321,38 +313,33 @@ func (s *state) passes(p pkg) bool {
 }
 
 // rebuild recomputes the filtered TreeTable forest (name -> os/arch ->
-// version, with the publish date in the version leaf's Published cell) and
-// refreshes the derived Observables (forest, selection/scroll reset, status
-// counts). Subscribed to every filter Observable, so it runs on construction
-// and on every filter change. It writes NO widget field directly — the bindings
-// push these Observables into the widgets. Deterministic: names, os/arch groups
-// and versions are each sorted.
+// version) and refreshes the derived Observables (forest, selection/scroll
+// reset, status counts). Subscribed to every filter Observable, so it runs on
+// construction and on every filter change. It writes NO widget field directly —
+// the bindings push these Observables into the widgets. Deterministic: names,
+// os/arch groups and versions are each sorted.
 func (s *state) rebuild() {
-	// name -> "os/arch" -> version -> published date. The registry has one
-	// row per (name, os, arch, version), so a plain assignment (last wins)
-	// carries each version's publication date without a merge branch.
-	byName := map[string]map[string]map[string]string{}
+	// name -> "os/arch" -> set of versions.
+	byName := map[string]map[string]map[string]bool{}
 	var names []string
 	for _, p := range s.pkgs {
 		if !s.passes(p) {
 			continue
 		}
 		if byName[p.Name] == nil {
-			byName[p.Name] = map[string]map[string]string{}
+			byName[p.Name] = map[string]map[string]bool{}
 			names = append(names, p.Name)
 		}
 		key := p.OS + "/" + p.Arch
 		if byName[p.Name][key] == nil {
-			byName[p.Name][key] = map[string]string{}
+			byName[p.Name][key] = map[string]bool{}
 		}
-		byName[p.Name][key][p.Version] = p.Published
+		byName[p.Name][key][p.Version] = true
 	}
 	sort.Strings(names)
 
 	// Forest of package-name nodes (TreeTable takes a forest, so there is no
-	// synthetic root). Cells[0] is the Package tree column; Cells[1] is the
-	// Published date column — populated only on the version leaves (name +
-	// os/arch rows leave it blank).
+	// synthetic root). Each node carries a single Package tree cell.
 	var forest []*toolkit.TreeTableNode
 	for _, name := range names {
 		nameNode := &toolkit.TreeTableNode{Cells: []string{name}, Expanded: true}
@@ -370,7 +357,7 @@ func (s *state) rebuild() {
 			sort.Strings(vers)
 			for _, v := range vers {
 				platNode.Children = append(platNode.Children,
-					&toolkit.TreeTableNode{Cells: []string{v, byName[name][k][v]}})
+					&toolkit.TreeTableNode{Cells: []string{v}})
 			}
 			nameNode.Children = append(nameNode.Children, platNode)
 		}
@@ -412,13 +399,11 @@ func cellAt(n *toolkit.TreeTableNode, j int) string {
 	return ""
 }
 
-// visibleRow captures one flattened grid row: its Package (tree) cell, its
-// Published cell and its indentation depth — everything a test needs to
-// predict which row paints where.
+// visibleRow captures one flattened grid row: its Package (tree) cell and its
+// indentation depth — everything a test needs to predict which row paints where.
 type visibleRow struct {
-	Label     string
-	Published string
-	Depth     int
+	Label string
+	Depth int
 }
 
 // visibleRows reproduces the TreeTable's visible (expand-aware) flattened
@@ -429,7 +414,7 @@ func (s *state) visibleRows() []visibleRow {
 	var out []visibleRow
 	var walk func(n *toolkit.TreeTableNode, depth int)
 	walk = func(n *toolkit.TreeTableNode, depth int) {
-		out = append(out, visibleRow{Label: cellAt(n, 0), Published: cellAt(n, 1), Depth: depth})
+		out = append(out, visibleRow{Label: cellAt(n, 0), Depth: depth})
 		if !n.Expanded {
 			return
 		}

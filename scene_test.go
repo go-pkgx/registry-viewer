@@ -9,10 +9,10 @@
 // rectangles the box layout produces (search box, filter-combo strip,
 // TreeTable grid) and the exact y-offset of each grid BODY row
 // (gridTop + header + index*rowHeight), then verify the SELECTED-row
-// Accent band, the header band, the column separator and a dated
-// Published cell all paint where the model says — tying the filtered
-// model directly to real pixels. Filter tests assert the grid's visible
-// package set shrinks to the exact expected packages.
+// Accent band, the header band and a version-leaf's painted text all land
+// where the model says — tying the filtered model directly to real pixels.
+// Filter tests assert the grid's visible package set shrinks to the exact
+// expected packages.
 
 package main
 
@@ -41,17 +41,6 @@ func px(surf []byte, x, y int) toolkit.RGBA {
 }
 
 func eqColor(a, b toolkit.RGBA) bool { return a.R == b.R && a.G == b.G && a.B == b.B }
-
-// gridGeom returns the grid's body width, the Package (col 0) width and the
-// x of the column separator, computed from the layout the same way the
-// TreeTable does (fixed Published column, auto Package column).
-func gridGeom(s *state) (bodyW, col0W, sepX int) {
-	r := s.grid.Bounds()
-	bodyW = r.W - scrollbarW // windowed
-	col0W = bodyW - gridPubColW
-	sepX = r.X + col0W
-	return
-}
 
 // hasInkIn reports whether any pixel in the [x0,x1)×[y0,y1) band differs
 // from bg (i.e. some text/glyph was painted there).
@@ -85,12 +74,9 @@ func TestNewStateParsesEmbeddedSample(t *testing.T) {
 	if s.search == nil || s.osDrop == nil || s.archDrop == nil || s.verDrop == nil || s.grid == nil || s.status == nil {
 		t.Fatal("newState left a core widget nil")
 	}
-	// The grid has the two columns: Package (tree) + Published (date).
-	if len(s.grid.Columns) != 2 || s.grid.Columns[0].Title != "Package" || s.grid.Columns[1].Title != "Published" {
-		t.Fatalf("grid columns = %+v, want [Package][Published]", s.grid.Columns)
-	}
-	if s.grid.Columns[1].Width != gridPubColW {
-		t.Fatalf("Published column width = %d, want %d", s.grid.Columns[1].Width, gridPubColW)
+	// The grid has a single Package tree column.
+	if len(s.grid.Columns) != 1 || s.grid.Columns[0].Title != "Package" {
+		t.Fatalf("grid columns = %+v, want [Package]", s.grid.Columns)
 	}
 	// Five distinct packages in the sample.
 	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"hugo", "jq", "lz4", "ripgrep", "zstd"}) {
@@ -205,20 +191,18 @@ func TestLayoutRectsArePrecise(t *testing.T) {
 
 // TestVisibleRowsMatchDefaultGrid asserts the flattened visible order of the
 // default (all-expanded) forest, giving each row a known body index and thus
-// a known y-offset. The publish date lives in each version leaf's Published
-// cell (not appended to the version text); the hugo/linux-amd64 0.128.0 leaf
-// has an EMPTY date, exercising the blank-cell path.
+// a known y-offset.
 func TestVisibleRowsMatchDefaultGrid(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	rows := s.visibleRows()
 	// No synthetic root — package names are the top-level forest (depth 0).
 	want := []visibleRow{
-		{"hugo", "", 0},
-		{"darwin/arm64", "", 1},
-		{"0.129.0", "2026-08-03", 2},
-		{"linux/amd64", "", 1},
-		{"0.128.0", "", 2}, // empty published cell
-		{"jq", "", 0},
+		{"hugo", 0},
+		{"darwin/arm64", 1},
+		{"0.129.0", 2},
+		{"linux/amd64", 1},
+		{"0.128.0", 2},
+		{"jq", 0},
 	}
 	if len(rows) < len(want) {
 		t.Fatalf("only %d visible rows, want at least %d", len(rows), len(want))
@@ -235,93 +219,31 @@ func TestVisibleRowsMatchDefaultGrid(t *testing.T) {
 	}
 }
 
-// TestVersionLeafCarriesPublishedDate walks the filtered grid and asserts a
-// specific version leaf's Cells = [version, date], and that the empty-date
-// leaf's Published cell is blank — the date threaded from the model into the
-// TreeTable cells the WASM view paints.
-func TestVersionLeafCarriesPublishedDate(t *testing.T) {
-	s := newState(surfaceW, surfaceH, nil)
-	var lz4 *toolkit.TreeTableNode
-	for _, n := range s.grid.Root {
-		if cellAt(n, 0) == "lz4" {
-			lz4 = n
-		}
-	}
-	if lz4 == nil {
-		t.Fatal("lz4 node missing")
-	}
-	found := false
-	for _, plat := range lz4.Children {
-		if cellAt(plat, 0) != "linux/amd64" {
-			continue
-		}
-		for _, leaf := range plat.Children {
-			if cellAt(leaf, 0) == "1.10.0" {
-				found = true
-				if cellAt(leaf, 1) != "2026-08-02" {
-					t.Fatalf("lz4 1.10.0 Published cell = %q, want 2026-08-02", cellAt(leaf, 1))
-				}
-			}
-		}
-	}
-	if !found {
-		t.Fatal("lz4 linux/amd64 1.10.0 leaf not found")
-	}
-	// hugo 0.128.0 leaf: empty Published cell.
-	for _, n := range s.grid.Root {
-		if cellAt(n, 0) != "hugo" {
-			continue
-		}
-		for _, plat := range n.Children {
-			for _, leaf := range plat.Children {
-				if cellAt(leaf, 0) == "0.128.0" && cellAt(leaf, 1) != "" {
-					t.Fatalf("undated hugo 0.128.0 Published cell = %q, want empty", cellAt(leaf, 1))
-				}
-			}
-		}
-	}
-}
-
-// TestGridHeaderAndColumnsPaint asserts the pixel-level grid chrome: the
-// header band (SurfaceAlt) at the grid top, the column separator (Border) at
-// the computed Package/Published boundary, and that a dated version leaf
-// paints INK in its Published column while the undated leaf's Published
-// column stays blank — proving the date renders in its own column, at the row
-// the model predicts.
-func TestGridHeaderAndColumnsPaint(t *testing.T) {
+// TestGridHeaderAndBodyPaint asserts the pixel-level grid chrome: the header
+// band (SurfaceAlt) at the grid top, sampled right of the left-aligned
+// "Package" title, and that a version-leaf body row paints INK (its version
+// text) in the single Package column at the row the model predicts.
+func TestGridHeaderAndBodyPaint(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	theme := s.theme
 	surf := newSurface()
 	s.draw(surf)
 
 	r := s.grid.Bounds()
-	bodyW, col0W, sepX := gridGeom(s)
-	_ = bodyW
+	bodyW := r.W - scrollbarW // windowed
 
-	// Header band: SurfaceAlt across the header height (sample an empty spot in
-	// the Package header, right of the "Package" title text).
-	if got := px(surf, r.X+col0W-24, r.Y+3); !eqColor(got, theme.SurfaceAlt) {
+	// Header band: SurfaceAlt across the header height, sampled well right of the
+	// left-aligned "Package" title text.
+	if got := px(surf, r.X+bodyW-16, r.Y+3); !eqColor(got, theme.SurfaceAlt) {
 		t.Fatalf("header band pixel = %+v, want SurfaceAlt %+v", got, theme.SurfaceAlt)
 	}
-	// Column separator: a 1px Border line at sepX spanning the grid height.
-	if got := px(surf, sepX, r.Y+3); !eqColor(got, theme.Border) {
-		t.Fatalf("column separator at x=%d = %+v, want Border %+v", sepX, got, theme.Border)
-	}
 
-	// Published column band, excluding the separator column and the scrollbar.
-	pubX0, pubX1 := sepX+2, r.X+col0W+gridPubColW-1
-
-	// Dated leaf (visible index 2 = hugo darwin/arm64 0.129.0, 2026-08-03):
-	// its Published column must carry ink.
-	datedY := s.rowY(2)
-	if !hasInkIn(surf, pubX0, pubX1, datedY+2, datedY+toolkit.TreeTableRowHeight-2, theme.Surface) {
-		t.Fatalf("dated row at y=%d shows NO ink in the Published column [%d,%d)", datedY, pubX0, pubX1)
-	}
-	// Undated leaf (visible index 4 = hugo linux/amd64 0.128.0, ""): its
-	// Published column must be blank (only the row's Surface fill).
-	undatedY := s.rowY(4)
-	if hasInkIn(surf, pubX0, pubX1, undatedY+2, undatedY+toolkit.TreeTableRowHeight-2, theme.Surface) {
-		t.Fatalf("undated row at y=%d unexpectedly shows ink in the Published column", undatedY)
+	// Version-leaf body row (visible index 2 = hugo darwin/arm64 0.129.0): its
+	// Package column must carry ink (the "0.129.0" text) over the row's Surface
+	// fill, at exactly the y the model predicts.
+	leafY := s.rowY(2)
+	if !hasInkIn(surf, r.X+2, r.X+bodyW-2, leafY+2, leafY+toolkit.TreeTableRowHeight-2, theme.Surface) {
+		t.Fatalf("version-leaf row at y=%d shows NO ink in the Package column", leafY)
 	}
 }
 
@@ -852,19 +774,14 @@ func TestParseRegistryError(t *testing.T) {
 	if _, err := parseRegistry([]byte("nonsense")); err == nil {
 		t.Fatal("parseRegistry should error on malformed JSON")
 	}
-	// A row WITH published, and one WITHOUT the key (tolerated -> "").
+	// A stray "published" key from an older registry.json is tolerated (ignored),
+	// so the viewer stays compatible with data emitted before the column dropped.
 	rows, err := parseRegistry([]byte(`[
 		{"name":"x","os":"linux","arch":"amd64","version":"1","published":"2026-08-02"},
 		{"name":"y","os":"darwin","arch":"arm64","version":"2"}
 	]`))
-	if err != nil || len(rows) != 2 || rows[0].Name != "x" {
+	if err != nil || len(rows) != 2 || rows[0].Name != "x" || rows[1].Name != "y" {
 		t.Fatalf("parseRegistry valid input: rows=%v err=%v", rows, err)
-	}
-	if rows[0].Published != "2026-08-02" {
-		t.Fatalf("row 0 Published = %q, want 2026-08-02", rows[0].Published)
-	}
-	if rows[1].Published != "" {
-		t.Fatalf("row 1 (no published key) Published = %q, want empty", rows[1].Published)
 	}
 }
 
