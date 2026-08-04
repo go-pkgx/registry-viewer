@@ -1,0 +1,30 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: stable }
+      - name: vet + test (100% coverage floor)
+        run: |
+          go vet ./...
+          go test -covermode=set -coverprofile=cover.out ./...
+          pct=$(go tool cover -func=cover.out | awk '/^total:/{gsub(/%/,"",$3); print $3}')
+          echo "coverage: $pct%"
+          awk -v p="$pct" 'BEGIN{ if (p+0 < 100) { print "coverage below 100%"; exit 1 } }'
+      - name: wasm build
+        run: GOOS=js GOARCH=wasm CGO_ENABLED=0 go build -o /tmp/app.wasm .
+
+  # MVVM is mandatory: this reusable gate fails the build if any app code mutates
+  # widget state outside a go-widgets/mvvm binding (see go-widgets/mvvmlint).
+  mvvm:
+    uses: go-widgets/mvvmlint/.github/workflows/mvvmlint.yml@main
