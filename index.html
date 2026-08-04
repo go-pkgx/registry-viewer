@@ -3,18 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>go-pkgx registry viewer — live wasm demo</title>
-<meta name="description" content="A filterable tree view of the go-pkgx package registry (name -> os/arch -> version), rendered into a browser canvas with go-widgets/toolkit.">
+<title>go-pkgx registry viewer</title>
+<meta name="description" content="A filterable tree view of the go-pkgx package registry (name -> os/arch -> version), rendered with go-widgets/toolkit into a browser canvas, with a plain-JS DOM fallback.">
 <style>
   html, body { margin: 0; background: #0b0d12; color: #e6e8f0; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
   .wrap { max-width: 820px; margin: 0 auto; padding: 24px 20px; text-align: center; }
   h1 { font-size: 1.6rem; letter-spacing: -.02em; margin: 0 0 6px; }
   .tagline { color: #9aa0b4; margin: 0 0 22px; }
   #screen { display: block; margin: 0 auto; background: #ffffff; border: 1px solid #262c40; border-radius: 12px; max-width: 100%; height: auto; cursor: pointer; box-shadow: 0 12px 40px rgba(20,184,166,.15); }
-  /* "Full window" (NOT the OS Fullscreen API): a fixed overlay that fills the
-     browser window's viewport. The canvas keeps its aspect (width:100%,
-     height:auto), so the mouse mapping in main.go — which scales uniformly via
-     getBoundingClientRect — stays exact. */
   #fswrap { position: fixed; inset: 0; z-index: 9999; overflow: auto; background: #0b0d12; display: none; }
   #fswrap.open { display: block; }
   #screen.maxi { max-width: none; width: 100vw; height: auto; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
@@ -24,85 +20,202 @@
   #err { color: #ff5f57; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .85rem; white-space: pre-wrap; }
   a { color: #14b8a6; }
   footer { color: #9aa0b4; text-align: center; padding: 14px 0 40px; font-size: .85rem; }
+
+  /* Loading overlay + progress bar (shown while app.wasm downloads/instantiates). */
+  #loading { max-width: 720px; margin: 24px auto; }
+  #loading .plabel { color: #9aa0b4; font-size: .9rem; margin: 0 0 8px; }
+  #ptrack { height: 8px; background: #1b2130; border-radius: 999px; overflow: hidden; }
+  #pbar { height: 100%; width: 0; background: linear-gradient(90deg,#14b8a6,#0ea5e9); transition: width .12s ease; }
+  #ptrack.indeterminate #pbar { width: 40%; animation: slide 1.1s ease-in-out infinite; }
+  @keyframes slide { 0%{margin-left:-40%} 100%{margin-left:100%} }
+
+  /* Plain-JS DOM fallback: an accessible <details> tree + filter controls. */
+  #jsview { display: none; text-align: left; max-width: 820px; margin: 0 auto; }
+  #jsview.on { display: block; }
+  #jsview .fbnote { color: #f0b429; font-size: .85rem; margin: 0 0 12px; }
+  #filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+  #filters input, #filters select { background: #11151f; color: #e6e8f0; border: 1px solid #262c40; border-radius: 8px; padding: 7px 10px; font: inherit; }
+  #filters input { flex: 1 1 200px; }
+  #count { color: #9aa0b4; font-size: .85rem; margin: 0 0 10px; }
+  #tree details { border-left: 1px solid #262c40; margin: 0 0 0 6px; padding-left: 12px; }
+  #tree > details { border-left: 0; padding-left: 0; }
+  #tree summary { cursor: pointer; padding: 2px 0; }
+  #tree .pkg { font-weight: 600; }
+  #tree .plat { color: #9aa0b4; }
+  #tree .ver { color: #cfe9e4; font-family: ui-monospace, Menlo, Consolas, monospace; padding: 1px 0 1px 18px; }
 </style>
 </head>
 <body>
   <div class="wrap">
     <h1>go-pkgx registry viewer</h1>
-    <p class="tagline">A filterable tree view of the <a href="https://github.com/go-pkgx">go-pkgx</a> package registry, in pure-Go wasm.</p>
-    <canvas id="screen" width="720" height="560"></canvas>
-    <button id="fsbtn" type="button">⛶ Full window</button>
-    <p class="hint">The registry is grouped <strong>name → os/arch → version</strong>. Type in the search box to filter by <strong>package name</strong> (case-insensitive, live), and use the three segmented controls to filter by <strong>os</strong>, <strong>arch</strong> and <strong>version</strong> — the filters combine with AND, and the status bar shows the live count. Click a tree row's chevron to expand or collapse it. Data is fetched from <code>registry.json</code>; if that fetch fails, a bundled sample is shown. Rendered entirely by <a href="https://github.com/go-widgets/toolkit">go-widgets/toolkit</a> (SearchEntry, ViewSwitcher, TreeView, VBox/HBox) onto a canvas. Press <strong>⛶ Full window</strong> (or double-click the canvas) to expand it — <kbd>Esc</kbd> exits.</p>
+    <p class="tagline">A filterable tree view of the <a href="https://github.com/go-pkgx">go-pkgx</a> package registry.</p>
+
+    <!-- Loading progress bar (like wasmdesk/wasmbox) — replaced by the canvas on success. -->
+    <div id="loading">
+      <p class="plabel" id="plabel">Loading the go-widgets viewer…</p>
+      <div id="ptrack" class="indeterminate"><div id="pbar"></div></div>
+    </div>
+
+    <canvas id="screen" width="720" height="560" style="display:none"></canvas>
+    <button id="fsbtn" type="button" style="display:none">⛶ Full window</button>
+
+    <!-- Plain-JS DOM fallback (no WASM): same data, an accessible collapsible tree. -->
+    <div id="jsview">
+      <p class="fbnote" id="fbnote">Showing the lightweight HTML view.</p>
+      <div id="filters">
+        <input id="f-name" type="search" placeholder="filter by package name…" autocomplete="off">
+        <select id="f-os"><option value="">os: all</option></select>
+        <select id="f-arch"><option value="">arch: all</option></select>
+        <select id="f-ver"><option value="">version: all</option></select>
+      </div>
+      <p id="count"></p>
+      <div id="tree"></div>
+    </div>
+
+    <p class="hint">Grouped <strong>name → os/arch → version</strong>. Filter by name (live) and by os / arch / version — filters combine with AND. The canvas view is rendered by <a href="https://github.com/go-widgets/toolkit">go-widgets/toolkit</a>; if WebAssembly is unavailable or fails to load, the page falls back to a plain-HTML tree with the same data. A no-JS listing is always at <a href="list.html">list.html</a>. Press <strong>⛶ Full window</strong> (or double-click the canvas) to expand — <kbd>Esc</kbd> exits.</p>
     <div id="err"></div>
     <p><a href="https://github.com/go-pkgx">go-pkgx</a> · <a href="https://github.com/go-pkgx/registry-viewer">source</a></p>
   </div>
   <footer>BSD-3-Clause · pure Go · CGO=0</footer>
   <div id="fswrap"></div>
+
   <script>
-    // "Full window" toggle — a fixed overlay filling the browser window's
-    // viewport, NOT the OS Fullscreen API. Enter: move the canvas into a
-    // fixed, scrollable overlay. Exit: put it back. The canvas element (and
-    // its 2D context) survive the DOM move, so rendering and click-mapping
-    // continue unbroken. Esc or the button/double-click exit.
+    // "Full window" toggle — a fixed overlay filling the browser window's viewport
+    // (NOT the OS Fullscreen API). The canvas + its 2D context survive the DOM move.
     (() => {
       const screen = document.getElementById("screen");
       const wrap = document.getElementById("fswrap");
       const btn = document.getElementById("fsbtn");
-      const home = screen.parentNode; // .wrap — restore target
+      const home = screen.parentNode;
       const on = () => screen.classList.contains("maxi");
-      const enter = () => {
-        wrap.appendChild(screen);
-        screen.classList.add("maxi"); wrap.classList.add("open");
-        document.body.classList.add("maxi-open");
-        btn.textContent = "⤢ Exit full window";
-      };
-      const exit = () => {
-        home.insertBefore(screen, btn); // back to its slot, before the button
-        screen.classList.remove("maxi"); wrap.classList.remove("open");
-        document.body.classList.remove("maxi-open");
-        btn.textContent = "⛶ Full window";
-      };
+      const enter = () => { wrap.appendChild(screen); screen.classList.add("maxi"); wrap.classList.add("open"); btn.textContent = "⤢ Exit full window"; };
+      const exit = () => { home.insertBefore(screen, btn); screen.classList.remove("maxi"); wrap.classList.remove("open"); btn.textContent = "⛶ Full window"; };
       const toggle = () => on() ? exit() : enter();
-      btn.textContent = "⛶ Full window";
       btn.addEventListener("click", toggle);
       screen.addEventListener("dblclick", toggle);
       document.addEventListener("keydown", (e) => { if (e.key === "Escape" && on()) exit(); });
     })();
   </script>
+
   <script>
-    // Defensive Go-wasm fs guard. Go's syscall/fs_js.go reads globalThis.fs
-    // (constants + writeSync) at init; wasm_exec.js only installs its fallback
-    // when globalThis.fs is absent. A named DOM element whose id shadows `fs`
-    // (or a browser quirk) can leave fs present-but-incomplete, which panics
-    // the runtime and blanks the canvas. Fill in only what's missing. Element
-    // ids on this page deliberately avoid "fs"/"process"/"path" (fswrap/fsbtn
-    // are safe).
+    // Defensive Go-wasm fs guard (wasm_exec.js only installs its fallback when
+    // globalThis.fs is absent). Page element ids avoid "fs"/"process"/"path".
     (() => {
       const g = globalThis;
       if (!g.fs || typeof g.fs.writeSync !== "function") {
         let buf = ""; const dec = new TextDecoder("utf-8");
         g.fs = {
           constants: { O_WRONLY: -1, O_RDWR: -1, O_CREAT: -1, O_TRUNC: -1, O_APPEND: -1, O_EXCL: -1, O_DIRECTORY: -1 },
-          writeSync(fd, b) {
-            buf += dec.decode(b);
-            const nl = buf.lastIndexOf("\n");
-            if (nl !== -1) { console.log(buf.substring(0, nl)); buf = buf.substring(nl + 1); }
-            return b.length;
-          },
+          writeSync(fd, b) { buf += dec.decode(b); const nl = buf.lastIndexOf("\n"); if (nl !== -1) { console.log(buf.substring(0, nl)); buf = buf.substring(nl + 1); } return b.length; },
           write(fd, b, off, len, pos, cb) { const n = this.writeSync(fd, b.subarray(off, off + len)); cb(null, n); },
         };
       }
     })();
   </script>
+
   <script src="wasm_exec.js"></script>
+
   <script>
+    // ---- plain-JS DOM fallback -------------------------------------------------
+    // Renders registry.json as a collapsible <details> tree with name/os/arch/
+    // version filters. Used when WebAssembly is unavailable or the wasm fails.
+    const FB = (() => {
+      let rows = [];
+      const el = (id) => document.getElementById(id);
+      const norm = (s) => (s || "").toLowerCase();
+      function fillSelect(sel, values, label) {
+        for (const v of values) { const o = document.createElement("option"); o.value = v; o.textContent = v; sel.appendChild(o); }
+      }
+      function apply() {
+        const nq = norm(el("f-name").value), os = el("f-os").value, ar = el("f-arch").value, ve = el("f-ver").value;
+        const shown = rows.filter(r =>
+          (!nq || norm(r.name).includes(nq)) && (!os || r.os === os) && (!ar || r.arch === ar) && (!ve || r.version === ve));
+        // group name -> os/arch -> version
+        const byName = new Map();
+        for (const r of shown) {
+          if (!byName.has(r.name)) byName.set(r.name, new Map());
+          const pl = r.os + "/" + r.arch, m = byName.get(r.name);
+          if (!m.has(pl)) m.set(pl, new Set());
+          m.get(pl).add(r.version);
+        }
+        const tree = el("tree"); tree.textContent = "";
+        for (const name of [...byName.keys()].sort()) {
+          const d = document.createElement("details"); if (byName.size <= 40) d.open = true;
+          const s = document.createElement("summary"); s.innerHTML = '<span class="pkg"></span>';
+          s.firstChild.textContent = name; d.appendChild(s);
+          for (const pl of [...byName.get(name).keys()].sort()) {
+            const pd = document.createElement("details"); pd.open = true;
+            const ps = document.createElement("summary"); ps.className = "plat"; ps.textContent = pl; pd.appendChild(ps);
+            for (const v of [...byName.get(name).get(pl)].sort()) {
+              const vv = document.createElement("div"); vv.className = "ver"; vv.textContent = v; pd.appendChild(vv);
+            }
+            d.appendChild(pd);
+          }
+          tree.appendChild(d);
+        }
+        el("count").textContent = byName.size + " package" + (byName.size === 1 ? "" : "s") + " · " + shown.length + " platform build" + (shown.length === 1 ? "" : "s") + " shown";
+      }
+      async function show(reason) {
+        el("loading").style.display = "none";
+        el("screen").style.display = "none";
+        el("fsbtn").style.display = "none";
+        el("jsview").classList.add("on");
+        if (reason) el("fbnote").textContent = "Canvas view unavailable (" + reason + ") — showing the lightweight HTML view.";
+        try {
+          const resp = await fetch("registry.json");
+          rows = resp.ok ? await resp.json() : [];
+        } catch (_) { rows = []; }
+        if (!rows.length) { el("tree").textContent = "No registry data."; el("count").textContent = ""; return; }
+        fillSelect(el("f-os"), [...new Set(rows.map(r => r.os))].sort());
+        fillSelect(el("f-arch"), [...new Set(rows.map(r => r.arch))].sort());
+        fillSelect(el("f-ver"), [...new Set(rows.map(r => r.version))].sort());
+        for (const id of ["f-name", "f-os", "f-arch", "f-ver"]) el(id).addEventListener("input", apply);
+        apply();
+      }
+      return { show };
+    })();
+
+    // ---- wasm boot with a real download progress bar ---------------------------
     (async () => {
+      const el = (id) => document.getElementById(id);
+      const setProgress = (frac) => {
+        const track = el("ptrack"), bar = el("pbar");
+        if (frac == null) { track.classList.add("indeterminate"); return; }
+        track.classList.remove("indeterminate");
+        bar.style.width = Math.max(0, Math.min(1, frac)) * 100 + "%";
+      };
+      if (typeof WebAssembly !== "object") { FB.show("WebAssembly not supported"); return; }
       try {
+        const resp = await fetch("app.wasm");
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        const total = +resp.headers.get("content-length") || 0;
+        const reader = resp.body && resp.body.getReader ? resp.body.getReader() : null;
+        let bytes;
+        if (reader) {
+          const chunks = []; let received = 0;
+          el("plabel").textContent = "Downloading the go-widgets viewer…";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value); received += value.length;
+            setProgress(total ? received / total : null);
+          }
+          bytes = new Uint8Array(received); let off = 0;
+          for (const c of chunks) { bytes.set(c, off); off += c.length; }
+        } else {
+          setProgress(null);
+          bytes = new Uint8Array(await resp.arrayBuffer());
+        }
+        setProgress(1);
+        el("plabel").textContent = "Starting…";
         const go = new Go();
-        const res = await WebAssembly.instantiateStreaming(fetch("app.wasm"), go.importObject);
+        const res = await WebAssembly.instantiate(bytes, go.importObject);
+        el("loading").style.display = "none";
+        el("screen").style.display = "block";
+        el("fsbtn").style.display = "block";
         go.run(res.instance);
       } catch (e) {
-        document.getElementById("err").textContent = "failed to boot the wasm: " + (e && e.message ? e.message : e);
+        FB.show(e && e.message ? e.message : String(e));
       }
     })();
   </script>
