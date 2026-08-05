@@ -495,7 +495,7 @@ func TestClickSearchFocusesAndTypes(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	r := s.search.Bounds()
 	s.handleClick(r.X+30, r.Y+r.H/2)
-	if !s.search.Focused || s.keyTarget != toolkit.Widget(s.search) {
+	if !s.search.Focused() || s.keyTarget != toolkit.Widget(s.search) {
 		t.Fatal("clicking the search box should focus it for keyboard input")
 	}
 	// Type "l" then "z" -> live name filter "lz" -> only lz4.
@@ -545,7 +545,7 @@ func TestClickComboMovesFocusOffSearch(t *testing.T) {
 	// Focus the search first.
 	sr := s.search.Bounds()
 	s.handleClick(sr.X+30, sr.Y+sr.H/2)
-	if !s.search.Focused {
+	if !s.search.Focused() {
 		t.Fatal("precondition: search should be focused")
 	}
 	// Click the os combo: it opens and takes focus off the search.
@@ -554,7 +554,7 @@ func TestClickComboMovesFocusOffSearch(t *testing.T) {
 	if !s.osDrop.Open {
 		t.Fatal("clicking the os combo should open it")
 	}
-	if s.keyTarget != toolkit.Widget(s.osDrop) || s.search.Focused {
+	if s.keyTarget != toolkit.Widget(s.osDrop) || s.search.Focused() {
 		t.Fatal("clicking a combo should move keyboard focus off the search box")
 	}
 }
@@ -574,12 +574,12 @@ func TestClickDeadSpaceClearsFocus(t *testing.T) {
 	// Focus the search first.
 	sr := s.search.Bounds()
 	s.handleClick(sr.X+30, sr.Y+sr.H/2)
-	if !s.search.Focused {
+	if !s.search.Focused() {
 		t.Fatal("precondition: search should be focused")
 	}
 	// Click far below every widget (in the status bar region).
 	s.handleClick(surfaceW/2, surfaceH-2)
-	if s.keyTarget != nil || s.search.Focused {
+	if s.keyTarget != nil || s.search.Focused() {
 		t.Fatal("dead-space click should clear keyboard focus")
 	}
 }
