@@ -302,17 +302,17 @@ func TestNameFilterReducesToExpectedSet(t *testing.T) {
 		t.Fatalf("unfiltered package count = %d, want 5", got)
 	}
 	// "lz" substring -> only lz4.
-	s.search.OnChange("lz")
+	s.search.Text().Set("lz")
 	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"lz4"}) {
 		t.Fatalf("name filter 'lz' -> %v, want [lz4]", got)
 	}
 	// "z" substring -> lz4 + zstd (case-insensitive, sorted).
-	s.search.OnChange("Z")
+	s.search.Text().Set("Z")
 	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"lz4", "zstd"}) {
 		t.Fatalf("name filter 'Z' -> %v, want [lz4 zstd]", got)
 	}
 	// Clearing restores all five.
-	s.search.OnChange("")
+	s.search.Text().Set("")
 	if got := len(s.shownNames()); got != 5 {
 		t.Fatalf("cleared name filter count = %d, want 5", got)
 	}
@@ -367,7 +367,7 @@ func TestDropDownPopoverRouting(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	dr := s.verDrop.Bounds()
 	s.handleClick(dr.X+dr.W/2, dr.Y+dr.H/2)
-	if !s.verDrop.Open {
+	if !s.verDrop.Open().Get() {
 		t.Fatal("clicking the version combo should open its popover")
 	}
 	s.draw(newSurface()) // renders the popover branch (must not panic)
@@ -375,7 +375,7 @@ func TestDropDownPopoverRouting(t *testing.T) {
 	pb := s.verDrop.PopoverBounds()
 	// Option row 1 is the first real version (row 0 is "All").
 	s.handleClick(pb.X+5, pb.Y+toolkit.PopoverRowH+toolkit.PopoverRowH/2)
-	if s.verDrop.Open {
+	if s.verDrop.Open().Get() {
 		t.Fatal("selecting a popover option should close it")
 	}
 	if s.verFilter() != s.verDomain[0] {
@@ -383,18 +383,18 @@ func TestDropDownPopoverRouting(t *testing.T) {
 	}
 	// Reopen, then dismiss with an outside click.
 	s.handleClick(dr.X+dr.W/2, dr.Y+dr.H/2)
-	if !s.verDrop.Open {
+	if !s.verDrop.Open().Get() {
 		t.Fatal("version combo should reopen")
 	}
 	s.handleClick(1, 1) // top-left, well outside the popover
-	if s.verDrop.Open {
+	if s.verDrop.Open().Get() {
 		t.Fatal("outside click should dismiss the popover")
 	}
 }
 
 func TestCombinedFiltersAND(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
-	s.search.OnChange("lz4")
+	s.search.Text().Set("lz4")
 	// archDomain = [amd64 arm64]; "arm64" -> domain index 1 -> option 2.
 	s.archDrop.Select(2)
 	if s.archFilter() != "arm64" {
@@ -417,7 +417,7 @@ func TestStatusCountUpdates(t *testing.T) {
 	if s.status.Segments[0] != "5 packages" || s.status.Segments[1] != "5 shown" {
 		t.Fatalf("initial status = %v, want [5 packages][5 shown]", s.status.Segments[:2])
 	}
-	s.search.OnChange("lz")
+	s.search.Text().Set("lz")
 	if s.status.Segments[0] != "5 packages" || s.status.Segments[1] != "1 shown" {
 		t.Fatalf("filtered status = %v, want [5 packages][1 shown]", s.status.Segments[:2])
 	}
@@ -439,8 +439,8 @@ func TestFilterObservablesDriveVisibleSet(t *testing.T) {
 	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"lz4"}) {
 		t.Fatalf("name Observable 'lz' -> %v, want [lz4]", got)
 	}
-	if s.search.Text != "lz" {
-		t.Fatalf("search.Text = %q, want lz (Observable -> widget)", s.search.Text)
+	if s.search.Text().Get() != "lz" {
+		t.Fatalf("search.Text = %q, want lz (Observable -> widget)", s.search.Text().Get())
 	}
 	s.name.Set("")
 
@@ -452,8 +452,8 @@ func TestFilterObservablesDriveVisibleSet(t *testing.T) {
 	if got := s.shownNames(); !reflect.DeepEqual(got, []string{"ripgrep", "zstd"}) {
 		t.Fatalf("osIdx=3 (windows) -> %v, want [ripgrep zstd]", got)
 	}
-	if s.osDrop.Selected != 3 {
-		t.Fatalf("osDrop.Selected = %d, want 3 (Observable -> widget)", s.osDrop.Selected)
+	if s.osDrop.Selected().Get() != 3 {
+		t.Fatalf("osDrop.Selected().Get() = %d, want 3 (Observable -> widget)", s.osDrop.Selected().Get())
 	}
 	// Status counts derive from the same model.
 	if s.status.Segments[0] != "5 packages" || s.status.Segments[1] != "2 shown" {
@@ -477,15 +477,15 @@ func TestRebuildResetsSelectionAndScroll(t *testing.T) {
 	x, y := gridPoint(s)
 	s.handleScroll(x, y, 4)
 	s.handleClick(x, y) // grid selects the clicked row internally
-	if s.grid.ScrollRow == 0 || s.grid.Selected == nil {
+	if s.grid.ScrollRow().Get() == 0 || s.grid.Selected().Get() == nil {
 		t.Fatal("precondition: grid should have scrolled and selected a row")
 	}
 	s.name.Set("lz") // any filter change triggers rebuild
-	if s.grid.ScrollRow != 0 {
-		t.Fatalf("rebuild left ScrollRow = %d, want 0", s.grid.ScrollRow)
+	if s.grid.ScrollRow().Get() != 0 {
+		t.Fatalf("rebuild left ScrollRow = %d, want 0", s.grid.ScrollRow().Get())
 	}
-	if s.grid.Selected != nil {
-		t.Fatalf("rebuild left Selected = %v, want nil", s.grid.Selected)
+	if s.grid.Selected().Get() != nil {
+		t.Fatalf("rebuild left Selected = %v, want nil", s.grid.Selected().Get())
 	}
 }
 
@@ -526,14 +526,14 @@ func TestClickClearAffordanceResetsFilter(t *testing.T) {
 	for _, ch := range []string{"l", "z", "4"} {
 		s.handleChar(ch)
 	}
-	if s.search.Text != "lz4" || s.nameFilter() != "lz4" {
-		t.Fatalf("precondition: Text=%q nameFilter=%q, want lz4", s.search.Text, s.nameFilter())
+	if s.search.Text().Get() != "lz4" || s.nameFilter() != "lz4" {
+		t.Fatalf("precondition: Text=%q nameFilter=%q, want lz4", s.search.Text().Get(), s.nameFilter())
 	}
 	// Click the trailing clear slot: local x in [W-pad-iconW, W-pad).
 	clearX := r.X + r.W - toolkit.SearchEntryPadX - toolkit.SearchEntryIconW/2
 	s.handleClick(clearX, r.Y+r.H/2)
-	if s.search.Text != "" || s.nameFilter() != "" {
-		t.Fatalf("clear slot click should reset filter; Text=%q nameFilter=%q", s.search.Text, s.nameFilter())
+	if s.search.Text().Get() != "" || s.nameFilter() != "" {
+		t.Fatalf("clear slot click should reset filter; Text=%q nameFilter=%q", s.search.Text().Get(), s.nameFilter())
 	}
 	if got := len(s.shownNames()); got != 5 {
 		t.Fatalf("count after clear = %d, want 5", got)
@@ -551,7 +551,7 @@ func TestClickComboMovesFocusOffSearch(t *testing.T) {
 	// Click the os combo: it opens and takes focus off the search.
 	r := s.osDrop.Bounds()
 	s.handleClick(r.X+r.W/2, r.Y+r.H/2)
-	if !s.osDrop.Open {
+	if !s.osDrop.Open().Get() {
 		t.Fatal("clicking the os combo should open it")
 	}
 	if s.keyTarget != toolkit.Widget(s.osDrop) || s.search.Focused() {
@@ -564,8 +564,8 @@ func TestClickGridSelectsRow(t *testing.T) {
 	// Click the first body row (body index 0 = hugo) past the chevron.
 	y := s.rowY(0) + toolkit.TreeTableRowHeight/2
 	s.handleClick(s.grid.Bounds().X+toolkit.TreeChevronW+30, y)
-	if s.grid.Selected == nil || cellAt(s.grid.Selected, 0) != "hugo" {
-		t.Fatalf("clicking the first grid row should select hugo; Selected=%v", s.grid.Selected)
+	if s.grid.Selected().Get() == nil || cellAt(s.grid.Selected().Get(), 0) != "hugo" {
+		t.Fatalf("clicking the first grid row should select hugo; Selected=%v", s.grid.Selected().Get())
 	}
 }
 
@@ -629,18 +629,18 @@ func TestWheelScrollShiftsGridWindow(t *testing.T) {
 	}
 	maxScroll := total - window
 
-	if s.grid.ScrollRow != 0 {
-		t.Fatalf("fresh grid ScrollRow = %d, want 0", s.grid.ScrollRow)
+	if s.grid.ScrollRow().Get() != 0 {
+		t.Fatalf("fresh grid ScrollRow = %d, want 0", s.grid.ScrollRow().Get())
 	}
 
 	x, y := gridPoint(s)
 
 	// Down-scroll: the first drawn body row's model index must increase.
-	before := s.grid.ScrollRow
+	before := s.grid.ScrollRow().Get()
 	if !s.handleScroll(x, y, 3) {
 		t.Fatal("handleScroll should report a change (re-render)")
 	}
-	after := s.grid.ScrollRow
+	after := s.grid.ScrollRow().Get()
 	if after <= before {
 		t.Fatalf("down-scroll: first body row index %d did not increase past %d", after, before)
 	}
@@ -650,14 +650,14 @@ func TestWheelScrollShiftsGridWindow(t *testing.T) {
 
 	// Down past the end clamps at total-window (last full window), not beyond.
 	s.handleScroll(x, y, 10*total)
-	if s.grid.ScrollRow != maxScroll {
-		t.Fatalf("over-scroll down: ScrollRow = %d, want clamp at %d", s.grid.ScrollRow, maxScroll)
+	if s.grid.ScrollRow().Get() != maxScroll {
+		t.Fatalf("over-scroll down: ScrollRow = %d, want clamp at %d", s.grid.ScrollRow().Get(), maxScroll)
 	}
 
 	// Up past the top clamps at 0 (no negative offset).
 	s.handleScroll(x, y, -10*total)
-	if s.grid.ScrollRow != 0 {
-		t.Fatalf("over-scroll up: ScrollRow = %d, want clamp at 0", s.grid.ScrollRow)
+	if s.grid.ScrollRow().Get() != 0 {
+		t.Fatalf("over-scroll up: ScrollRow = %d, want clamp at 0", s.grid.ScrollRow().Get())
 	}
 
 	// A scroll whose point falls on a non-scrollable widget (the search box)
@@ -666,8 +666,8 @@ func TestWheelScrollShiftsGridWindow(t *testing.T) {
 	if !s.handleScroll(sr.X+5, sr.Y+sr.H/2, 3) {
 		t.Fatal("handleScroll always reports true")
 	}
-	if s.grid.ScrollRow != 0 {
-		t.Fatalf("scroll over the search box moved the grid: ScrollRow = %d, want 0", s.grid.ScrollRow)
+	if s.grid.ScrollRow().Get() != 0 {
+		t.Fatalf("scroll over the search box moved the grid: ScrollRow = %d, want 0", s.grid.ScrollRow().Get())
 	}
 }
 
@@ -684,7 +684,7 @@ func TestScrolledRenderDiffersAndDumpsPNG(t *testing.T) {
 
 	x, y := gridPoint(s)
 	s.handleScroll(x, y, 6) // scroll down six rows
-	if s.grid.ScrollRow == 0 {
+	if s.grid.ScrollRow().Get() == 0 {
 		t.Fatal("precondition: grid should have scrolled off row 0")
 	}
 
