@@ -36,8 +36,8 @@ import (
 // assignment, so mvvmlint leaves it alone.
 func bindWidgets(s *state) {
 	oneWaySet(s.focused, s.search.SetFocused)
-	mvvm.OneWay(s.selection, &s.grid.Selected, nil)
-	mvvm.OneWay(s.scroll, &s.grid.ScrollRow, nil)
+	oneWaySet(s.selection, s.grid.Selected().Set)
+	oneWaySet(s.scroll, s.grid.ScrollRow().Set)
 	mvvm.OneWay(s.totalText, &s.status.Segments[0], nil)
 	mvvm.OneWay(s.shownText, &s.status.Segments[1], nil)
 }
