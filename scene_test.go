@@ -108,7 +108,9 @@ func TestNewStateFallsBackOnEmptyArray(t *testing.T) {
 // the single "?" — rendered.
 func TestTitleAndMagnifierChrome(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
-	if s.title == nil || s.title.Text != "Registry Viewer" {
+	// A label's text is an observable rather than a field, so this reads what
+	// the label is bound to and not a value copied into place.
+	if s.title == nil || s.title.Text().Get() != "Registry Viewer" {
 		t.Fatalf("title label = %v, want text \"Registry Viewer\"", s.title)
 	}
 	if s.search.Icon == nil {
