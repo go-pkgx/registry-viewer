@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-iconoir/iconoir"
 	"github.com/go-widgets/mvvm"
 	"github.com/go-widgets/mvvmtk"
 	"github.com/go-widgets/painter"
@@ -101,14 +102,16 @@ type state struct {
 	// --- view-model: derived Observables (rebuild() output) --------------
 	// forest is the filtered TreeTable forest (bound to grid.Root via
 	// mvvmtk.BindTree). selection / scroll reset the grid's transient view on
-	// every rebuild; totalText / shownText drive the Statusbar segments;
-	// focused drives the SearchEntry caret. See bindings.go for the sinks.
+	// every rebuild; totalText / shownText drive the Statusbar segments. The
+	// SearchEntry caret is NOT an app Observable: the toolkit's focus-owning
+	// container (root VBox) owns keyboard focus once a click routes through it,
+	// so the SearchEntry lights its own caret from its embedded focus state
+	// (see handleClick / hasFocus).
 	forest    *mvvm.ObservableList[*toolkit.TreeTableNode]
 	selection *mvvm.Observable[*toolkit.TreeTableNode]
 	scroll    *mvvm.Observable[int]
 	totalText *mvvm.Observable[string]
 	shownText *mvvm.Observable[string]
-	focused   *mvvm.Observable[bool]
 
 	// Widgets. A title Label heads the scene; a SearchEntry filters by name;
 	// three DropDown combos filter os / arch / version. The registry itself is
@@ -127,11 +130,6 @@ type state struct {
 	// combos left-to-right.
 	root      *toolkit.VBox
 	filterRow *toolkit.HBox
-
-	// Live hit-test list (draw order) + the keyboard-focused widget
-	// (the SearchEntry once clicked), mirroring the gallery template.
-	clickables []toolkit.Widget
-	keyTarget  toolkit.Widget
 }
 
 // parseRegistry unmarshals the registry.json byte form into rows. A nil
@@ -201,7 +199,6 @@ func newState(w, _ int, data []byte) *state {
 	s.scroll = mvvm.NewObservableEq[int](0, nil)
 	s.totalText = mvvm.NewObservable("")
 	s.shownText = mvvm.NewObservable("")
-	s.focused = mvvm.NewObservable(false)
 
 	// --- widgets ---------------------------------------------------------
 	s.title = toolkit.NewLabel("Registry Viewer")
@@ -210,8 +207,12 @@ func newState(w, _ int, data []byte) *state {
 
 	s.search = toolkit.NewSearchEntry("")
 	// A real magnifier in the left prefix slot replaces the toolkit's "?"
-	// bitmap-font stand-in (drawn with painter primitives; see drawMagnifier).
-	s.search.Icon = drawMagnifier
+	// bitmap-font stand-in. The glyph is go-iconoir's "search" icon (a stroked,
+	// anti-aliased vector), so no icon is hand-drawn: the closure hands the
+	// prefix slot rect + the theme's OnSurface ink straight to iconoir.Draw.
+	s.search.Icon = func(p painter.Painter, r toolkit.Rect, ink toolkit.RGBA) {
+		iconoir.Draw(p, r, "search", ink)
+	}
 
 	s.osDrop = toolkit.NewDropDown(append([]string{"All"}, s.osDomain...), 0)
 	s.archDrop = toolkit.NewDropDown(append([]string{"All"}, s.archDomain...), 0)
@@ -262,10 +263,6 @@ func newState(w, _ int, data []byte) *state {
 	s.root.AddFlex(s.grid, 1)
 	s.root.AddFixed(s.status, toolkit.StatusbarH)
 	s.root.SetBounds(toolkit.Rect{X: margin, Y: margin, W: w - 2*margin, H: surfaceH - 2*margin})
-
-	// Hit-test order = visual/z order: filters first, then the grid. The title
-	// Label is non-interactive (HitTest false), so it stays out of clickables.
-	s.clickables = []toolkit.Widget{s.search, s.osDrop, s.archDrop, s.verDrop, s.grid}
 
 	s.rebuild()
 	return s
@@ -451,73 +448,25 @@ func (s *state) draw(buf []byte) {
 	}
 }
 
-// drawMagnifier paints a small magnifier — a ring plus a short diagonal
-// handle — in the SearchEntry's leading icon slot, replacing the toolkit's
-// "?" bitmap-font stand-in. r is the icon slot rect and ink is the theme's
-// OnSurface colour; it uses only painter PutPixel primitives so it renders
-// identically on every backend.
-func drawMagnifier(p painter.Painter, r toolkit.Rect, ink toolkit.RGBA) {
-	// Ring: a circle in the upper-left of the slot, sized to leave room for the
-	// handle running out toward the lower-right corner.
-	const radius = 4
-	cx := r.X + radius + 1
-	cy := r.Y + r.H/2 - 1
-	// Midpoint circle: one step of x/y plots all eight octants of the ring.
-	x, y, errv := radius, 0, 1-radius
-	for x >= y {
-		p.PutPixel(cx+x, cy+y, ink)
-		p.PutPixel(cx+y, cy+x, ink)
-		p.PutPixel(cx-y, cy+x, ink)
-		p.PutPixel(cx-x, cy+y, ink)
-		p.PutPixel(cx-x, cy-y, ink)
-		p.PutPixel(cx-y, cy-x, ink)
-		p.PutPixel(cx+y, cy-x, ink)
-		p.PutPixel(cx+x, cy-y, ink)
-		y++
-		if errv < 0 {
-			errv += 2*y + 1
-		} else {
-			x--
-			errv += 2*(y-x) + 1
-		}
-	}
-	// Handle: a short 45° diagonal from the ring's lower-right, two pixels thick
-	// so it reads at any zoom, running toward the slot's lower-right corner.
-	hx, hy := cx+radius-1, cy+radius-1
-	for i := 0; i < 5; i++ {
-		p.PutPixel(hx+i, hy+i, ink)
-		p.PutPixel(hx+i+1, hy+i, ink)
-	}
-}
-
-// handleClick dispatches a click at surface (x, y) to whichever widget it
-// falls in, in draw order. Clicking the SearchEntry focuses it for
-// keyboard input; clicking anything else (or dead space) clears that
-// focus. Mirrors the gallery's clickables dispatch.
+// handleClick dispatches a click at surface (x, y) through the widget tree.
+// The root VBox is a focus-owning container: on an EventClick it moves keyboard
+// focus to the focusable descendant that was hit (defocusing the previous one)
+// and delivers the click to it, so the SearchEntry lights its own caret and a
+// combo/grid takes focus for its own key handling — no app-level keyTarget or
+// focus bookkeeping. Always reports true so the driver re-renders.
+//
+// The one thing the tree cannot own is an OPEN combo popover: it floats above
+// the grid, outside every widget's Bounds, so a bounds-based hit-test never
+// reaches it. That single overlay is routed here first — inside selects the
+// option, outside dismisses it — before the click falls through to the tree.
 func (s *state) handleClick(x, y int) bool {
-	ev := toolkit.Event{Kind: toolkit.EventClick, X: x, Y: y}
-
-	// An open combo popover floats above everything: the DropDown routes the
-	// click itself — inside selects that option (firing OnSelect -> Observable),
-	// outside dismisses it. A closed DropDown returns false, so we fall through
-	// to normal hit-testing (where a click on the control reopens it).
 	for _, d := range s.dropdowns() {
 		if d.PopoverClick(x, y) {
 			return true
 		}
 	}
-
-	for _, w := range s.clickables {
-		r := w.Bounds()
-		if inside(x, y, r) {
-			s.keyTarget = w
-			s.focused.Set(w == toolkit.Widget(s.search))
-			w.OnEvent(local(ev, r))
-			return true
-		}
-	}
-	s.keyTarget = nil
-	s.focused.Set(false)
+	ev := toolkit.Event{Kind: toolkit.EventClick, X: x, Y: y}
+	s.root.OnEvent(local(ev, s.root.Bounds()))
 	return true
 }
 
@@ -541,24 +490,39 @@ func (s *state) handleMove(x, y int) bool { _, _ = x, y; return false }
 // uniform main.go event-wiring surface.
 func (s *state) handleRelease(x, y int) bool { _, _ = x, y; return false }
 
-// handleChar routes a printable character to the focused widget (the
-// SearchEntry) as an EventChar, so the name filter updates live as the
-// user types. Reports whether a target consumed it.
+// hasFocus reports whether any of the scene's focusable widgets currently holds
+// keyboard focus. The toolkit's focus-owning root manages the flag; the scene
+// only reads it, to decide whether a key/char event is the app's to consume (so
+// a keystroke with nothing focused falls through to the browser's own handling
+// instead of being swallowed + preventDefault'd).
+func (s *state) hasFocus() bool {
+	return s.search.Focused() || s.osDrop.Focused() || s.archDrop.Focused() ||
+		s.verDrop.Focused() || s.grid.Focused()
+}
+
+// handleChar routes a printable character through the widget tree as an
+// EventChar: the focus-owning root delivers it to whichever descendant holds
+// focus (the SearchEntry, so the name filter updates live as the user types).
+// It reports whether the app consumed it — true only when something is focused,
+// so a stray keystroke over an unfocused scene is left to the browser.
 func (s *state) handleChar(ch string) bool {
-	if s.keyTarget == nil {
+	if !s.hasFocus() {
 		return false
 	}
-	s.keyTarget.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: ch})
+	s.root.OnEvent(toolkit.Event{Kind: toolkit.EventChar, Code: ch})
 	return true
 }
 
-// handleKeyDown routes a named key (Backspace, …) to the focused widget
-// as an EventKeyDown. Reports whether a target consumed it.
+// handleKeyDown routes a named key (Backspace, Tab, ArrowDown, …) through the
+// widget tree as an EventKeyDown: the focus-owning root moves focus on Tab /
+// Shift+Tab and otherwise delivers the key to the focused descendant for its own
+// handling. It reports whether the app consumed it — true only when something is
+// focused, mirroring handleChar.
 func (s *state) handleKeyDown(code string) bool {
-	if s.keyTarget == nil {
+	if !s.hasFocus() {
 		return false
 	}
-	s.keyTarget.OnEvent(toolkit.Event{Kind: toolkit.EventKeyDown, Code: code})
+	s.root.OnEvent(toolkit.Event{Kind: toolkit.EventKeyDown, Code: code})
 	return true
 }
 
@@ -570,11 +534,6 @@ func fillBG(buf []byte, w, h int, c toolkit.RGBA) {
 		buf[i], buf[i+1], buf[i+2], buf[i+3] = c.R, c.G, c.B, c.A
 	}
 	_, _ = w, h
-}
-
-// inside reports whether (x, y) falls in r (half-open on the far edges).
-func inside(x, y int, r toolkit.Rect) bool {
-	return x >= r.X && x < r.X+r.W && y >= r.Y && y < r.Y+r.H
 }
 
 // local re-bases a surface-space event into r's widget-local coordinates.

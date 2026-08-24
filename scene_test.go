@@ -25,6 +25,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/go-iconoir/iconoir"
+	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
 
@@ -102,10 +104,11 @@ func TestNewStateFallsBackOnEmptyArray(t *testing.T) {
 
 // TestTitleAndMagnifierChrome asserts the scene's new chrome: a title Label
 // reading "Registry Viewer", and a real magnifier Icon on the SearchEntry that
-// replaces the toolkit's "?" stand-in. It renders and checks the magnifier ring
-// paints ink at its exact leftmost + rightmost points in the icon slot, and that
-// the slot carries a drawn shape (many inked pixels), proving a real glyph — not
-// the single "?" — rendered.
+// replaces the toolkit's "?" stand-in. The magnifier is go-iconoir's "search"
+// glyph (no hand-drawn icon): the test renders the scene, then renders that same
+// iconoir glyph over the entry's Surface fill into a reference buffer, and
+// asserts the SearchEntry's prefix slot is byte-identical to it — proving the
+// pixels come from iconoir, not a hand-rolled loupe or the "?" stand-in.
 func TestTitleAndMagnifierChrome(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	// A label's text is an observable rather than a field, so this reads what
@@ -120,31 +123,39 @@ func TestTitleAndMagnifierChrome(t *testing.T) {
 	surf := newSurface()
 	s.draw(surf)
 
+	// The SearchEntry's leading prefix slot, exactly as searchentry.go computes
+	// it (at the default density scaled() is identity, so the bases apply raw).
 	sb := s.search.Bounds()
-	const radius = 4
-	cx := sb.X + toolkit.SearchEntryPadX + radius + 1
-	cy := sb.Y + sb.H/2 - 1
+	iconR := toolkit.Rect{X: sb.X + toolkit.SearchEntryPadX, Y: sb.Y, W: toolkit.SearchEntryIconW, H: sb.H}
 	ink := s.theme.OnSurface
-	// Ring left + right points (exact plotted positions of drawMagnifier).
-	if got := px(surf, cx-radius, cy); !eqColor(got, ink) {
-		t.Fatalf("magnifier ring left point (%d,%d) = %+v, want OnSurface %+v", cx-radius, cy, got, ink)
+
+	// Reference: iconoir's own "search" glyph blitted over the entry's Surface
+	// fill (the same base the SearchEntry draws the icon over), so alpha blending
+	// matches pixel-for-pixel.
+	ref := newSurface()
+	fillBG(ref, surfaceW, surfaceH, s.theme.Surface)
+	if !iconoir.Draw(painter.NewPixelPainter(ref, surfaceW, surfaceH), iconR, "search", ink) {
+		t.Fatal("iconoir has no \"search\" icon")
 	}
-	if got := px(surf, cx+radius, cy); !eqColor(got, ink) {
-		t.Fatalf("magnifier ring right point (%d,%d) = %+v, want OnSurface %+v", cx+radius, cy, got, ink)
-	}
-	// The icon slot carries a drawn shape: ring (>=8 octant points) + handle.
-	x0 := sb.X + toolkit.SearchEntryPadX
-	x1 := x0 + toolkit.SearchEntryIconW
+
+	// Compare the slot interior — inset one pixel top/bottom so the entry's own
+	// border chrome (the field outline at y=r.Y and y=r.Y+r.H-1) is skipped; the
+	// 16px glyph is centred well inside that band, so every glyph pixel is still
+	// checked.
 	inked := 0
-	for y := sb.Y; y < sb.Y+sb.H; y++ {
-		for x := x0; x < x1; x++ {
-			if eqColor(px(surf, x, y), ink) {
+	for y := iconR.Y + 1; y < iconR.Y+iconR.H-1; y++ {
+		for x := iconR.X; x < iconR.X+iconR.W; x++ {
+			got, want := px(surf, x, y), px(ref, x, y)
+			if !eqColor(got, want) {
+				t.Fatalf("icon slot pixel (%d,%d) = %+v, want iconoir search %+v", x, y, got, want)
+			}
+			if eqColor(got, ink) {
 				inked++
 			}
 		}
 	}
-	if inked < 12 {
-		t.Fatalf("icon slot shows only %d inked pixels; magnifier not drawn", inked)
+	if inked < 8 {
+		t.Fatalf("icon slot shows only %d full-ink pixels; iconoir search glyph not drawn", inked)
 	}
 }
 
@@ -497,7 +508,7 @@ func TestClickSearchFocusesAndTypes(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	r := s.search.Bounds()
 	s.handleClick(r.X+30, r.Y+r.H/2)
-	if !s.search.Focused() || s.keyTarget != toolkit.Widget(s.search) {
+	if !s.search.Focused() {
 		t.Fatal("clicking the search box should focus it for keyboard input")
 	}
 	// Type "l" then "z" -> live name filter "lz" -> only lz4.
@@ -556,7 +567,7 @@ func TestClickComboMovesFocusOffSearch(t *testing.T) {
 	if !s.osDrop.Open().Get() {
 		t.Fatal("clicking the os combo should open it")
 	}
-	if s.keyTarget != toolkit.Widget(s.osDrop) || s.search.Focused() {
+	if !s.osDrop.Focused() || s.search.Focused() {
 		t.Fatal("clicking a combo should move keyboard focus off the search box")
 	}
 }
@@ -571,7 +582,7 @@ func TestClickGridSelectsRow(t *testing.T) {
 	}
 }
 
-func TestClickDeadSpaceClearsFocus(t *testing.T) {
+func TestClickDeadSpaceKeepsFocus(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	// Focus the search first.
 	sr := s.search.Bounds()
@@ -579,18 +590,28 @@ func TestClickDeadSpaceClearsFocus(t *testing.T) {
 	if !s.search.Focused() {
 		t.Fatal("precondition: search should be focused")
 	}
-	// Click far below every widget (in the status bar region).
-	s.handleClick(surfaceW/2, surfaceH-2)
-	if s.keyTarget != nil || s.search.Focused() {
-		t.Fatal("dead-space click should clear keyboard focus")
+	// Click far below every widget (past the scene's root VBox). The
+	// focus-owning root leaves focus unchanged on a click that hits no
+	// focusable (standard sticky-focus semantics), so the search keeps focus
+	// and typing still routes to it — unlike a hand-rolled dead-space blur.
+	s.handleClick(surfaceW/2, surfaceH-1)
+	if !s.search.Focused() {
+		t.Fatal("a click on no focusable should leave keyboard focus unchanged")
+	}
+	if !s.hasFocus() || !s.handleChar("q") {
+		t.Fatal("the retained focus should still consume typed input")
 	}
 }
 
-func TestNoTargetKeyHandlersAreNoOps(t *testing.T) {
+func TestNoFocusKeyHandlersAreNoOps(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
-	s.keyTarget = nil
+	// A freshly built scene has nothing focused, so key/char events are the
+	// browser's, not the app's: the handlers report no change (no preventDefault).
+	if s.hasFocus() {
+		t.Fatal("precondition: a fresh scene has no focused widget")
+	}
 	if s.handleChar("x") || s.handleKeyDown("Backspace") {
-		t.Fatal("key handlers with no focus target should report no change")
+		t.Fatal("key handlers with no focus should report no change")
 	}
 }
 
@@ -794,11 +815,8 @@ func TestBannerAndMain(t *testing.T) {
 	main() // native stub: prints the banner, must not panic
 }
 
-func TestInsideAndLocalHelpers(t *testing.T) {
+func TestLocalHelper(t *testing.T) {
 	r := toolkit.Rect{X: 10, Y: 20, W: 30, H: 40}
-	if !inside(15, 25, r) || inside(0, 0, r) || inside(40, 60, r) {
-		t.Fatal("inside half-open containment wrong")
-	}
 	ev := local(toolkit.Event{X: 25, Y: 30}, r)
 	if ev.X != 15 || ev.Y != 10 {
 		t.Fatalf("local rebasing wrong: %+v", ev)
