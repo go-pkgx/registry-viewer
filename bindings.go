@@ -18,7 +18,6 @@ import (
 // through these seams). Each seeds its field from the Observable now and repaints
 // on every later change:
 //
-//   - focused   -> SearchEntry.SetFocused (caret visibility)
 //   - selection -> TreeTable.Selected     (reset on every rebuild)
 //   - scroll    -> TreeTable.ScrollRow     (reset on every rebuild)
 //   - totalText -> Statusbar.Segments[0]   ("N packages")
@@ -29,13 +28,12 @@ import (
 // needed: main.go re-renders after each handled event, synchronously after the
 // binding has propagated.
 //
-// The focus sink is the one that cannot use a raw &field pointer: toolkit
-// v0.108.0 replaced SearchEntry's exported Focused bool with the Focusable
-// SetFocused/Focused method pair, so caret visibility is driven through the
-// setter by oneWaySet rather than mvvm.OneWay. A method call is not a selector
-// assignment, so mvvmlint leaves it alone.
+// SearchEntry caret visibility is NOT sunk here: the toolkit's focus-owning root
+// (the scene's VBox) owns keyboard focus once a click routes through it, so the
+// SearchEntry lights its own caret from its embedded focus state. The scene only
+// reads that focus (state.hasFocus) — it never writes it — so there is no focus
+// Observable to bind.
 func bindWidgets(s *state) {
-	oneWaySet(s.focused, s.search.SetFocused)
 	oneWaySet(s.selection, s.grid.Selected().Set)
 	oneWaySet(s.scroll, s.grid.ScrollRow().Set)
 	mvvm.OneWay(s.totalText, &s.status.Segments[0], nil)
