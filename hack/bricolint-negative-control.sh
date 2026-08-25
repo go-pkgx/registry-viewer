@@ -35,10 +35,14 @@ ANCHOR='p := painter\.NewPixelPainter\(buf, s\.w, s\.h\)'
 INJECT=$'\tp.FillRect(painter.Rect{X: 0, Y: 0, W: 1, H: 1}, s.theme.Background) // NEGATIVE-CONTROL: raw painter primitive, must be flagged'
 DIAG='hand-drawn UI'
 
+# Restore the target ONLY once a real backup has been taken (RESTORE=1) and it
+# is non-empty. This stops a failure before the cp below from letting the trap
+# copy an empty temp over $TARGET and wipe it.
 BACKUP="$(mktemp)"
-cp "$TARGET" "$BACKUP"
-restore() { cp "$BACKUP" "$TARGET"; rm -f "$BACKUP"; }
+RESTORE=0
+restore() { [ "$RESTORE" = 1 ] && [ -s "$BACKUP" ] && cp "$BACKUP" "$TARGET"; rm -f "$BACKUP"; return 0; }
 trap restore EXIT
+cp "$TARGET" "$BACKUP"; RESTORE=1
 
 vet() { GOWORK=off go vet -vettool="$BRICOLINT" ./... ; }
 
