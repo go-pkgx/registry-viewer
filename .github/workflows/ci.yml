@@ -28,3 +28,22 @@ jobs:
   # widget state outside a go-widgets/mvvm binding (see go-widgets/mvvmlint).
   mvvm:
     uses: go-widgets/mvvmlint/.github/workflows/mvvmlint.yml@main
+
+  # No hand-drawn UI: this go/analysis pass fails the build if any app code calls
+  # a painter drawing primitive (FillRect, Stroke*, DrawImage, Text, …) on a
+  # go-widgets/painter receiver, or constructs a toolkit widget inside a
+  # Draw/Paint/Render method — every element must be a toolkit widget (see
+  # go-widgets/bricolint). The negative control proves the guard actually bites.
+  bricolint:
+    runs-on: ubuntu-latest
+    env: { GOWORK: "off" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26.4" }
+      - name: Install bricolint
+        run: go install github.com/go-widgets/bricolint/cmd/bricolint@v0.1.0
+      - name: Guard against hand-drawn UI
+        run: go vet -vettool="$(go env GOPATH)/bin/bricolint" ./...
+      - name: Negative control (the guard must bite)
+        run: BRICOLINT="$(go env GOPATH)/bin/bricolint" bash hack/bricolint-negative-control.sh
