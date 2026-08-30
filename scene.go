@@ -29,7 +29,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/go-iconoir/iconoir"
+	"github.com/go-icons/iconoir"
 	"github.com/go-widgets/mvvm"
 	"github.com/go-widgets/mvvmtk"
 	"github.com/go-widgets/painter"
@@ -207,12 +207,10 @@ func newState(w, _ int, data []byte) *state {
 
 	s.search = toolkit.NewSearchEntry("")
 	// A real magnifier in the left prefix slot replaces the toolkit's "?"
-	// bitmap-font stand-in. The glyph is go-iconoir's "search" icon (a stroked,
-	// anti-aliased vector), so no icon is hand-drawn: the closure hands the
-	// prefix slot rect + the theme's OnSurface ink straight to iconoir.Draw.
-	s.search.Icon = func(p painter.Painter, r toolkit.Rect, ink toolkit.RGBA) {
-		iconoir.Draw(p, r, "search", ink)
-	}
+	// bitmap-font stand-in. The glyph is Iconoir's "search" icon (a stroked,
+	// anti-aliased vector), so no icon is hand-drawn: go-icons ships the pack as
+	// SVG source and toolkit.SVGIcon rasterises it, caching per (document, ink).
+	s.search.Icon = searchIcon
 
 	s.osDrop = toolkit.NewDropDown(append([]string{"All"}, s.osDomain...), 0)
 	s.archDrop = toolkit.NewDropDown(append([]string{"All"}, s.archDomain...), 0)
@@ -270,6 +268,9 @@ func newState(w, _ int, data []byte) *state {
 
 // dropdowns returns the three filter combos in a fixed order, so the
 // popover draw + click routing can iterate them uniformly.
+// searchIcon draws Iconoir's magnifier, resolved once rather than per frame.
+var searchIcon = toolkit.SVGIcon(iconoir.Icon("search"))
+
 func (s *state) dropdowns() []*toolkit.DropDown {
 	return []*toolkit.DropDown{s.osDrop, s.archDrop, s.verDrop}
 }

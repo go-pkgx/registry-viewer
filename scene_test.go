@@ -25,7 +25,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/go-iconoir/iconoir"
+	"github.com/go-icons/iconoir"
 	"github.com/go-widgets/painter"
 	"github.com/go-widgets/toolkit"
 )
@@ -104,11 +104,11 @@ func TestNewStateFallsBackOnEmptyArray(t *testing.T) {
 
 // TestTitleAndMagnifierChrome asserts the scene's new chrome: a title Label
 // reading "Registry Viewer", and a real magnifier Icon on the SearchEntry that
-// replaces the toolkit's "?" stand-in. The magnifier is go-iconoir's "search"
+// replaces the toolkit's "?" stand-in. The magnifier is Iconoir's "search"
 // glyph (no hand-drawn icon): the test renders the scene, then renders that same
-// iconoir glyph over the entry's Surface fill into a reference buffer, and
+// glyph over the entry's Surface fill into a reference buffer, and
 // asserts the SearchEntry's prefix slot is byte-identical to it — proving the
-// pixels come from iconoir, not a hand-rolled loupe or the "?" stand-in.
+// pixels come from the icon pack, not a hand-rolled loupe or the "?" stand-in.
 func TestTitleAndMagnifierChrome(t *testing.T) {
 	s := newState(surfaceW, surfaceH, nil)
 	// A label's text is an observable rather than a field, so this reads what
@@ -129,14 +129,19 @@ func TestTitleAndMagnifierChrome(t *testing.T) {
 	iconR := toolkit.Rect{X: sb.X + toolkit.SearchEntryPadX, Y: sb.Y, W: toolkit.SearchEntryIconW, H: sb.H}
 	ink := s.theme.OnSurface
 
-	// Reference: iconoir's own "search" glyph blitted over the entry's Surface
-	// fill (the same base the SearchEntry draws the icon over), so alpha blending
-	// matches pixel-for-pixel.
+	// Reference: the pack's "search" glyph, named HERE and rasterised
+	// independently of whatever the scene installed, blitted over the entry's
+	// Surface fill (the same base the SearchEntry draws over) so alpha blending
+	// matches pixel-for-pixel. Building it from the scene's own drawer instead
+	// would compare the scene with itself and pass for any icon at all — which
+	// it did, until a control run with the wrong glyph caught it.
+	doc := iconoir.Icon("search")
+	if doc == "" {
+		t.Fatal("the icon pack has no \"search\" icon")
+	}
 	ref := newSurface()
 	fillBG(ref, surfaceW, surfaceH, s.theme.Surface)
-	if !iconoir.Draw(painter.NewPixelPainter(ref, surfaceW, surfaceH), iconR, "search", ink) {
-		t.Fatal("iconoir has no \"search\" icon")
-	}
+	toolkit.SVGIcon(doc)(painter.NewPixelPainter(ref, surfaceW, surfaceH), iconR, ink)
 
 	// Compare the slot interior — inset one pixel top/bottom so the entry's own
 	// border chrome (the field outline at y=r.Y and y=r.Y+r.H-1) is skipped; the
@@ -147,7 +152,7 @@ func TestTitleAndMagnifierChrome(t *testing.T) {
 		for x := iconR.X; x < iconR.X+iconR.W; x++ {
 			got, want := px(surf, x, y), px(ref, x, y)
 			if !eqColor(got, want) {
-				t.Fatalf("icon slot pixel (%d,%d) = %+v, want iconoir search %+v", x, y, got, want)
+				t.Fatalf("icon slot pixel (%d,%d) = %+v, want the pack's search glyph %+v", x, y, got, want)
 			}
 			if eqColor(got, ink) {
 				inked++
@@ -155,7 +160,7 @@ func TestTitleAndMagnifierChrome(t *testing.T) {
 		}
 	}
 	if inked < 8 {
-		t.Fatalf("icon slot shows only %d full-ink pixels; iconoir search glyph not drawn", inked)
+		t.Fatalf("icon slot shows only %d full-ink pixels; the search glyph was not drawn", inked)
 	}
 }
 
