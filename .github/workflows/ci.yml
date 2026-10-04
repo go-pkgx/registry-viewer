@@ -28,6 +28,12 @@ jobs:
   # widget state outside a go-widgets/mvvm binding (see go-widgets/mvvmlint).
   mvvm:
     uses: go-widgets/mvvmlint/.github/workflows/mvvmlint.yml@main
+    # Passed explicitly: that reusable workflow defaults go-version to
+    # "1.26.4", and a default in SOMEBODY ELSE'S repository is not a pin this
+    # repository controls. Without it the job runs an older toolchain than
+    # go.mod requires and fails with
+    #   go: go.mod requires go >= 1.27.1 (running go 1.26.4; GOTOOLCHAIN=local)
+    with: { go-version: "1.27.1" }
 
   # No hand-drawn UI: this go/analysis pass fails the build if any app code calls
   # a painter drawing primitive (FillRect, Stroke*, DrawImage, Text, …) on a
@@ -40,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
-        with: { go-version: "1.26.4" }
+        with: { go-version: "1.27.1" }
       - name: Install bricolint
         run: go install github.com/go-widgets/bricolint/cmd/bricolint@v0.1.0
       - name: Guard against hand-drawn UI
