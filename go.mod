@@ -1,6 +1,6 @@
 module github.com/go-pkgx/registry-viewer
 
-go 1.26.4
+go 1.27.1
 
 require (
 	github.com/go-icons/iconoir v0.2.0
