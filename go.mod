@@ -3,11 +3,11 @@ module github.com/go-pkgx/registry-viewer
 go 1.27.1
 
 require (
-	github.com/go-icons/iconoir v0.2.0
-	github.com/go-widgets/mvvm v0.9.0
-	github.com/go-widgets/mvvmtk v0.12.0
-	github.com/go-widgets/painter v0.13.0
-	github.com/go-widgets/toolkit v0.321.2
+	github.com/go-icons/iconoir v0.2.1
+	github.com/go-widgets/mvvm v0.10.0
+	github.com/go-widgets/mvvmtk v0.13.0
+	github.com/go-widgets/painter v0.14.0
+	github.com/go-widgets/toolkit v0.324.0
 )
 
 require (
