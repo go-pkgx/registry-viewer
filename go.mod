@@ -4,10 +4,10 @@ go 1.27.1
 
 require (
 	github.com/go-icons/iconoir v0.3.0
-	github.com/go-widgets/mvvm v0.11.0
+	github.com/go-widgets/mvvm v0.13.0
 	github.com/go-widgets/mvvmtk v0.14.1
 	github.com/go-widgets/painter v0.15.0
-	github.com/go-widgets/toolkit v0.326.0
+	github.com/go-widgets/toolkit v0.328.0
 )
 
 require (
