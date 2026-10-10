@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
-        with: { go-version: '1.27.1' }
+        with: { go-version: '1.27.2' }
       - name: vet + test (100% coverage floor)
         run: |
           go vet ./...
@@ -46,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
-        with: { go-version: "1.27.1" }
+        with: { go-version: "1.27.2" }
       - name: Install bricolint
         run: go install github.com/go-widgets/bricolint/cmd/bricolint@v0.1.0
       - name: Guard against hand-drawn UI
